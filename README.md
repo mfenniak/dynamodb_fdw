@@ -169,9 +169,8 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
-- DynamoDB foreign schema import.
 - Allow the "partition_key" and "sort_key" table fields to be renamed.
-- Currently only performs a "Query" operation when you do an exact search for a partition_key.  Some additional query operations could be supported.
+- Currently only performs a "Query" operation when you do an exact search for a partition_key.  Some additional query operations could be supported; using the sort key, and supporting non-exact lookups.
 - Secondary indexes aren't ever used.  It seems possible to automatically match up query attempts with available secondary indexes.
 - "Scan" operations are done sequentially.  DynamoDB's API does support parallel scans, which could be implemented.
 - Most filtering is done by PostgreSQL, excluding the partition key query.  More filtering operations could be sent to DynamoDB to reduce the amount of data being retrieved.
