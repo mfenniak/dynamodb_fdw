@@ -18,5 +18,5 @@ setup(
     description='Postgresql Foregin Data Wrapper mapping Amazon DynamoDB',
     #long_description=open('README.txt').read(),
     #long_description=read('README.txt'),
-    install_requires=["boto"],
+    install_requires=["boto3"],
 )
