@@ -74,7 +74,8 @@ So, what can you do now?
 Querying a DynamoDB table:
 
 ```
-=> SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' LIMIT 10;
+=> SELECT document FROM dynamodb
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' LIMIT 10;
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -95,7 +96,8 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Neat!  Notice that there's a warning here about a SCAN operation being used.  If you can, it's possible to avoid that warning by providing a parition_key search:
 
 ```
-=> SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND partition_key = 'key877';
+=> SELECT document FROM dynamodb
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND partition_key = 'key877';
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2 records; DynamoDB scanned 2 records server-side
                           document
 ------------------------------------------------------------
@@ -127,7 +129,8 @@ Cool, any PostgreSQL aggregation will work on DynamoDB data.  It could be very, 
 
 ```
 => SELECT document FROM dynamodb 
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
+   AND document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -141,13 +144,19 @@ Again, it will tend to perform a full-scan and be slow... but that's neat!  Two 
 
 ```
 => DELETE FROM dynamodb
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
+   AND document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
 DELETE 2
 
 => INSERT INTO dynamodb (region, table_name, partition_key, sort_key, document)
-   SELECT 'us-west-2', 'fdwtest2', 'key' || s, 'key3' || s, json_build_object('text', 'hello ' || s, 'another-key', 'else')
+   SELECT
+     'us-west-2',
+     'fdwtest2',
+     'key' || s,
+     'key3' || s,
+     json_build_object('text', 'hello ' || s, 'another-key', 'else')
    FROM generate_series(1, 2) s RETURNING partition_key, sort_key, document;
  partition_key | sort_key |                   document
 ---------------+----------+----------------------------------------------
