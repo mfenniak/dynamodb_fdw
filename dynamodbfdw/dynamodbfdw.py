@@ -7,7 +7,6 @@ import decimal
 
 # "MVP" List:
 #
-# use Query for partition_key and sort_key searches
 # support paginated results from Query & Scan
 # support insert
 # support delete
@@ -17,12 +16,18 @@ import decimal
 # (CI docker push?)
 # cleanup unused files in repo
 # rewrite README
-# add warnings to output the number of scan/query API calls, and total number of records processed
+# add warnings to output the number of scan/query API calls, and total number of records processed; Count & ScannedCount results
 # test whether logging an error interrupts work, or needs to have a raise as well
-
+# reduce logging from WARNING
+#
 # Future:
 #
+# support multiple partition key values in a Query, rather than just one exact value
 # Somehow support secondary indexes
+# do we get anything about 'LIMIT' ops in the quals, and can we pass that to scan & query?
+# support multiple parallel scan operations if we can?
+# send upstream sort key searches as part of query -- with support for EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN
+# not sure, but Query might support EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN on partition keys as well -- we could use Query in more than just EQ case
 
 def get_table(aws_region, table_name):
     boto_config = Config(region_name=aws_region)
@@ -107,6 +112,8 @@ class MyJsonEncoder(json.JSONEncoder):
             return list(o)
         return super().default(o)
 
+not_found_sentinel = object()
+
 class DynamoFdw(ForeignDataWrapper):
     """
     DynamoDB foreign data wrapper
@@ -131,11 +138,17 @@ class DynamoFdw(ForeignDataWrapper):
         return 'oid'
 
     def get_required_exact_field(self, quals, field):
+        value = self.get_optional_exact_field(quals, field)
+        if value is not_found_sentinel:
+            log_to_postgres("You must query for a specific target %s" % field, ERROR)
+            # FIXME: raise?
+        return value
+
+    def get_optional_exact_field(self, quals, field):
         for qual in quals:
             if qual.field_name == field and qual.operator == '=':
                 return qual.value
-        else:
-            log_to_postgres("You must query for a specific target %s" % field, ERROR)
+        return not_found_sentinel # None is a valid qual.value; so we don't use None here
 
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), WARNING)
@@ -145,15 +158,38 @@ class DynamoFdw(ForeignDataWrapper):
         table_name = self.get_required_exact_field(quals, 'table_name')
 
         table = get_table(aws_region, table_name)
-        # log_to_postgres("key_schema repr: %r" % (table.key_schema,), WARNING)
+        key_schema = table.key_schema # cache; not sure if this causes API calls on every access
+        # log_to_postgres("key_schema repr: %r" % (key_schema,), WARNING)
+
+        query_params = None
+
+        partition_key_value = self.get_optional_exact_field(quals, 'partition_key')
+        if partition_key_value is not not_found_sentinel:
+            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), WARNING)
+            query_params = {
+                'KeyConditions': {}
+            }
+            for key in key_schema:
+                if key['KeyType'] == 'HASH':
+                    query_params['KeyConditions'][key['AttributeName']] = {
+                        'AttributeValueList': [partition_key_value],
+                        'ComparisonOperator': 'EQ',
+                    }
+                    break
+            else:
+                raise Exception('unable to find hash key in key_schema')
+
+        if query_params is not None:
+            log_to_postgres("performing QUERY operation: %r" % (query_params,), WARNING)
+            data_page = table.query(**query_params)['Items']
+        else:
+            log_to_postgres("performing SCAN operation", WARNING)
+            data_page = table.scan()['Items']
 
         # FIXME: pagination of results
-        # FIXME: multiple parallel scan/querys?
-        # FIXME: send some simple conditions upstream, especially PK & sort key operations, with query?
+        # query: LastEvaluatedKey & ExclusiveStartKey
 
-        key_schema = table.key_schema # cache; not sure if this causes API calls on every access
-
-        for ddb_row in table.scan()['Items']:
+        for ddb_row in data_page:
             pg_row = {
                 'region': aws_region,
                 'table_name': table_name,
