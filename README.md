@@ -29,13 +29,12 @@ To make it super easy, dynamodb_fdw comes in a Docker container with the softwar
 ```
 docker run -d \
     -p 5432:5432 \
-    -ePOSTGRES_PASSWORD=a-postgres-password \
-    -eAWS_ACCESS_KEY_ID=AKIA...access.key... \
-    -eAWS_SECRET_ACCESS_KEY=...secret.access.key... \
+    -e POSTGRES_PASSWORD=a-postgres-password \
+    -v $HOME/.aws:/var/lib/postgresql/.aws \
     mfenniak/dynamodb_fdw:latest
 ```
 
-Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used.
+Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  AWS credentials in this example were provided by sharing `$HOME/.aws` into the container, but can also be provided by any boto3 supported mechanism (eg. environment variables, instance profile metadata).  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used to customize the PostgreSQL server.
 
 Once running, you can con use any PostgreSQL client to access the DB and start running SQL.
 
