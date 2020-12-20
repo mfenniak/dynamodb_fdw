@@ -1,6 +1,6 @@
 # DynamoDB Foreign Data Wrapper for PostgreSQL
 
-dynamodb_fdw allows for the querying and modification of data stored in AWS DyanmoDB tables from PostgreSQL.
+dynamodb_fdw allows for the querying and modification of data stored in AWS DynamoDB tables from PostgreSQL.
 
 ## Why?
 
@@ -35,7 +35,7 @@ docker run -d \
     mfenniak/dynamodb_fdw:latest
 ```
 
-Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  Any other options supported by the (docker standard PostgreSQL image)[https://hub.docker.com/_/postgres] can also be used.
+Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used.
 
 Once running, you can con use any PostgreSQL client to access the DB and start running SQL.
 
@@ -53,22 +53,28 @@ CREATE FOREIGN TABLE dynamodb (
 ```
 
 The fields in this table are:
-- `oid` -- a composite primary key of `region`, `table_name`, `partition_key`, and `sort_key` used because multicorn (Python FDW wrapper) only supports a single column for write operations.  Basically, ignore this.
-- `region` -- AWS region name, eg. `us-west-2`; you *must* filter on this when querying `dynamodb`
-- `table_name` -- DynamoDB table name, eg. `my-dynamodb-table`; you *must* filter on this when querying `dynamodb`
-- `partition_key` -- the partition key of the DynamoDB table.  Only string partition keys are supported currently.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.
-- `sort_key` -- the sort key of the DynamoDB table.  Only string sort keys are supported currently.
-- `document` -- a JSON-structured version of the entire DynamoDB record.
+- `oid`
+  - a composite primary key of `region`, `table_name`, `partition_key`, and `sort_key` used because multicorn (Python FDW wrapper) only supports a single column for write operations.  Basically, ignore this.
+- `region`
+  - AWS region name, eg. `us-west-2`; you *must* filter on this when querying `dynamodb`
+- `table_name`
+  - DynamoDB table name, eg. `my-dynamodb-table`; you *must* filter on this when querying `dynamodb`
+- `partition_key`
+  - the partition key of the DynamoDB table.  Only string partition keys are supported currently.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.
+- `sort_key`
+  - the sort key of the DynamoDB table.  Only string sort keys are supported currently.
+- `document`
+  - a JSON-structured version of the entire DynamoDB record.
 
 
-You *must* always provide a filter on `region` and `table_name` when querying this table.  It's a bit awkard, I'll admit.
+You *must* always provide a filter on `region` and `table_name` when querying this table.  It's a bit awkard.  But, you can create views to wrap around specific table queries.
 
-So, what can you do?
+So, what can you do now?
 
-Querying:
+Querying a DynamoDB table:
 
 ```
-postgres=# SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' LIMIT 10;
+=> SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' LIMIT 10;
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -86,10 +92,10 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 (10 rows)
 ```
 
-Neat!  If you can, it's possible to avoid that warning by providing a parition_key search...
+Neat!  Notice that there's a warning here about a SCAN operation being used.  If you can, it's possible to avoid that warning by providing a parition_key search:
 
 ```
-postgres=# SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND partition_key = 'key877';
+=> SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND partition_key = 'key877';
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2 records; DynamoDB scanned 2 records server-side
                           document
 ------------------------------------------------------------
@@ -102,7 +108,7 @@ Alright, well that's kinda boring.  How about some things that DynamoDB can't do
 
 
 ```
-postgres=# SELECT partition_key, count(*)
+=> SELECT partition_key, count(*)
    FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
    GROUP BY partition_key ORDER BY count desc LIMIT 5;
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
@@ -120,7 +126,8 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Cool, any PostgreSQL aggregation will work on DynamoDB data.  It could be very, very slow if the table is large... but it will work.  How about filtering based upon the contents of the DynamoDB table, rather than the keys?
 
 ```
-postgres=# SELECT document FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
+=> SELECT document FROM dynamodb 
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -133,14 +140,15 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Again, it will tend to perform a full-scan and be slow... but that's neat!  Two more little tricks, though...
 
 ```
-postgres=# DELETE FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
+=> DELETE FROM dynamodb
+   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
 DELETE 2
 
-postgres=# INSERT INTO dynamodb (region, table_name, partition_key, sort_key, document)
-  SELECT 'us-west-2', 'fdwtest2', 'key' || s, 'key3' || s, json_build_object('text', 'hello ' || s, 'another-key', 'else')
-  FROM generate_series(1, 2) s RETURNING partition_key, sort_key, document;
+=> INSERT INTO dynamodb (region, table_name, partition_key, sort_key, document)
+   SELECT 'us-west-2', 'fdwtest2', 'key' || s, 'key3' || s, json_build_object('text', 'hello ' || s, 'another-key', 'else')
+   FROM generate_series(1, 2) s RETURNING partition_key, sort_key, document;
  partition_key | sort_key |                   document
 ---------------+----------+----------------------------------------------
  key1          | key31    | {"text" : "hello 1", "another-key" : "else"}
