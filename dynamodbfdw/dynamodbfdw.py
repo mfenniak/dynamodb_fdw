@@ -5,22 +5,6 @@ import boto3
 import simplejson as json
 import decimal
 
-# "MVP" List:
-# write up a single "start docker container"
-# push docker container to docker hub
-# (CI docker push?)
-# cleanup unused files in repo
-# rewrite README
-# add warnings to output the number of scan/query API calls, and total number of records processed; Count & ScannedCount results
-# reduce logging from WARNING
-#
-# Future:
-# support multiple partition key values in a Query, rather than just one exact value
-# Somehow support secondary indexes
-# support multiple parallel scan operations if we can?
-# send upstream sort key searches as part of query -- with support for EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN
-# not sure, but Query might support EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN on partition keys as well -- we could use Query in more than just EQ case
-
 def get_table(aws_region, table_name):
     boto_config = Config(region_name=aws_region)
     dynamodb = boto3.resource('dynamodb', config=boto_config)
@@ -104,50 +88,52 @@ class DynamoFdw(ForeignDataWrapper):
         page_count = 0
 
         last_evaluated_key = None
-        while True:
-            if query_params is not None:
-                my_query_params = {}
-                my_query_params.update(query_params)
-                if last_evaluated_key is not None:
-                    my_query_params['ExclusiveStartKey'] = last_evaluated_key
-                log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
-                resp = table.query(**my_query_params)
-            else:
-                my_scan_params = {}
-                if last_evaluated_key is not None:
-                    my_scan_params['ExclusiveStartKey'] = last_evaluated_key
+        try:
+            while True:
+                if query_params is not None:
+                    my_query_params = {}
+                    my_query_params.update(query_params)
+                    if last_evaluated_key is not None:
+                        my_query_params['ExclusiveStartKey'] = last_evaluated_key
+                    log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
+                    resp = table.query(**my_query_params)
                 else:
-                    log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
-                log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
-                resp = table.scan(**my_scan_params)
+                    my_scan_params = {}
+                    if last_evaluated_key is not None:
+                        my_scan_params['ExclusiveStartKey'] = last_evaluated_key
+                    else:
+                        log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
+                    log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
+                    resp = table.scan(**my_scan_params)
 
-            scanned_count += resp['ScannedCount']
-            local_count += resp['Count']
-            page_count += 1
+                scanned_count += resp['ScannedCount']
+                local_count += resp['Count']
+                page_count += 1
 
-            data_page = resp['Items']
-            for ddb_row in data_page:
-                pg_row = {
-                    'region': aws_region,
-                    'table_name': table_name,
-                }
-                for key in key_schema:
-                    if key['KeyType'] == 'HASH':
-                        pg_row['partition_key'] = ddb_row[key['AttributeName']]
-                    elif key['KeyType'] == 'RANGE':
-                        pg_row['sort_key'] = ddb_row[key['AttributeName']]
-                # at this point, pg_row contains all the unique identifiers of the row... which... is exactly what oid needs to contain
-                pg_row['oid'] = json.dumps(pg_row)
-                # FIXME: should I remove the keys from the document, so that they can't be used for conditions that won't be translated to queries?
-                pg_row['document'] = json.dumps(ddb_row, cls=MyJsonEncoder)
-                yield pg_row
+                data_page = resp['Items']
+                for ddb_row in data_page:
+                    pg_row = {
+                        'region': aws_region,
+                        'table_name': table_name,
+                    }
+                    for key in key_schema:
+                        if key['KeyType'] == 'HASH':
+                            pg_row['partition_key'] = ddb_row[key['AttributeName']]
+                        elif key['KeyType'] == 'RANGE':
+                            pg_row['sort_key'] = ddb_row[key['AttributeName']]
+                    # at this point, pg_row contains all the unique identifiers of the row... which... is exactly what oid needs to contain
+                    pg_row['oid'] = json.dumps(pg_row)
+                    # FIXME: should I remove the keys from the document, so that they can't be used for conditions that won't be translated to queries?
+                    pg_row['document'] = json.dumps(ddb_row, cls=MyJsonEncoder)
+                    yield pg_row
 
-            last_evaluated_key = resp.get('LastEvaluatedKey')
-            log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
-            if last_evaluated_key is None:
-                break
-
-        log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
+                last_evaluated_key = resp.get('LastEvaluatedKey')
+                log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
+                if last_evaluated_key is None:
+                    break
+        finally:
+            # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause
+            log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
     
     def delete(self, oid):
         # called once for each row to be deleted, with the oid value
