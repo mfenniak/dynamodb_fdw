@@ -37,28 +37,23 @@ docker run -d \
 
 Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used.
 
-Once running, you can con use any PostgreSQL client to access the DB and start running SQL.
-
-The docker container has a pre-built foreign table called `dynamodb` with this structure:
+Once running, you can con use any PostgreSQL client to access the DB and start running SQL.  Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  DynamoDB is a schema-less system except for the partition & sort keys; and dynamodb_fdw represents that accurately by providing most of the data in a `document` json field.  Your table schema should look like this:
 
 ```
-CREATE FOREIGN TABLE dynamodb (
+CREATE FOREIGN TABLE fdwtest2 (
     oid TEXT,
-    region TEXT,
-    table_name TEXT,
     partition_key TEXT,
     sort_key TEXT,
     document JSON NOT NULL
-) server multicorn_dynamo;
+) SERVER multicorn_dynamo OPTIONS (
+    aws_region 'us-west-2',
+    table_name 'fdwtest2'
+)
 ```
 
 The fields in this table are:
 - `oid`
-  - a composite primary key of `region`, `table_name`, `partition_key`, and `sort_key` used because multicorn (Python FDW wrapper) only supports a single column for write operations.  Basically, ignore this.
-- `region`
-  - AWS region name, eg. `us-west-2`; you *must* filter on this when querying `dynamodb`
-- `table_name`
-  - DynamoDB table name, eg. `my-dynamodb-table`; you *must* filter on this when querying `dynamodb`
+  - a composite primary key of `partition_key`, and `sort_key` used because multicorn (Python FDW wrapper) only supports a single column for write operations.  Basically, ignore this, though.
 - `partition_key`
   - the partition key of the DynamoDB table.  Only string partition keys are supported currently.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.
 - `sort_key`
@@ -66,16 +61,10 @@ The fields in this table are:
 - `document`
   - a JSON-structured version of the entire DynamoDB record.
 
-
-You *must* always provide a filter on `region` and `table_name` when querying this table.  It's a bit awkard.  But, you can create views to wrap around specific table queries.
-
-So, what can you do now?
-
-Querying a DynamoDB table:
+So, what can you do now?  Let's start simple, by querying a DynamoDB table:
 
 ```
-=> SELECT document FROM dynamodb
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' LIMIT 10;
+=> SELECT document FROM fdwtest2 LIMIT 10;
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -96,8 +85,7 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Neat!  Notice that there's a warning here about a SCAN operation being used.  If you can, it's possible to avoid that warning by providing a parition_key search:
 
 ```
-=> SELECT document FROM dynamodb
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2' AND partition_key = 'key877';
+=> SELECT document FROM fdwtest2 WHERE partition_key = 'key877';
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2 records; DynamoDB scanned 2 records server-side
                           document
 ------------------------------------------------------------
@@ -111,7 +99,7 @@ Alright, well that's kinda boring.  How about some things that DynamoDB can't do
 
 ```
 => SELECT partition_key, count(*)
-   FROM dynamodb WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
+   FROM fdwtest2
    GROUP BY partition_key ORDER BY count desc LIMIT 5;
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
@@ -128,9 +116,8 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Cool, any PostgreSQL aggregation will work on DynamoDB data.  It could be very, very slow if the table is large... but it will work.  How about filtering based upon the contents of the DynamoDB table, rather than the keys?
 
 ```
-=> SELECT document FROM dynamodb 
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
-   AND document->>'text' = 'hello 453';
+=> SELECT document FROM fdwtest2 
+   WHERE document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
                           document
@@ -143,17 +130,14 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Again, it will tend to perform a full-scan and be slow... but that's neat!  Two more little tricks, though...
 
 ```
-=> DELETE FROM dynamodb
-   WHERE region = 'us-west-2' AND table_name = 'fdwtest2'
-   AND document->>'text' = 'hello 453';
+=> DELETE FROM fdwtest2
+   WHERE document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
 DELETE 2
 
-=> INSERT INTO dynamodb (region, table_name, partition_key, sort_key, document)
+=> INSERT INTO fdwtest2 (partition_key, sort_key, document)
    SELECT
-     'us-west-2',
-     'fdwtest2',
      'key' || s,
      'key3' || s,
      json_build_object('text', 'hello ' || s, 'another-key', 'else')
@@ -173,6 +157,8 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
+- DynamoDB foreign schema import.
+- Allow the "partition_key" and "sort_key" table fields to be renamed.
 - Currently only performs a "Query" operation when you do an exact search for a partition_key.  Some additional query operations could be supported.
 - Secondary indexes aren't ever used.  It seems possible to automatically match up query attempts with available secondary indexes.
 - "Scan" operations are done sequentially.  DynamoDB's API does support parallel scans, which could be implemented.
