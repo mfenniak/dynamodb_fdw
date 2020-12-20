@@ -19,4 +19,6 @@ then
         -H "Content-Type: application/json" \
         --data "{\"tag_name\":\"$BUILD_NUM\",\"name\":\"$BUILD_NUM\",\"target_commitish\":\"$CODEBUILD_RESOLVED_SOURCE_VERSION\" }" \
         https://$GITHUB_USER:$GITHUB_TOKEN@api.github.com/repos/mfenniak/dynamodb_fdw/releases
+
+    # Test commit
 fi
