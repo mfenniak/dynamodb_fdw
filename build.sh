@@ -22,3 +22,5 @@ then
         -u $GITHUB_USER:$GITHUB_TOKEN \
         https://api.github.com/repos/mfenniak/dynamodb_fdw/releases
 fi
+
+# pointless commit
