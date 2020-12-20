@@ -8,14 +8,12 @@ import decimal
 # "MVP" List:
 # support insert
 # support delete
-# put error in place for update
 # write up a single "start docker container"
 # push docker container to docker hub
 # (CI docker push?)
 # cleanup unused files in repo
 # rewrite README
 # add warnings to output the number of scan/query API calls, and total number of records processed; Count & ScannedCount results
-# test whether logging an error interrupts work, or needs to have a raise as well
 # reduce logging from WARNING
 #
 # Future:
@@ -127,6 +125,7 @@ class DynamoFdw(ForeignDataWrapper):
     def __init__(self, options, columns):
         super(DynamoFdw, self).__init__(options, columns)
         self.columns = columns
+        self.pending_batch_write = []
         # FIXME: validate that the columns are exactly as expected, maybe?
 
     @property
@@ -137,7 +136,6 @@ class DynamoFdw(ForeignDataWrapper):
         value = self.get_optional_exact_field(quals, field)
         if value is not_found_sentinel:
             log_to_postgres("You must query for a specific target %s" % field, ERROR)
-            # FIXME: raise?
         return value
 
     def get_optional_exact_field(self, quals, field):
@@ -213,41 +211,110 @@ class DynamoFdw(ForeignDataWrapper):
             if last_evaluated_key is None:
                 break
     
-    def delete(self, oldvalues):
-        # WARNING:  delete oldvalues: 'blahblah3'
-        # WARNING:  delete oldvalues: 'idkey2'
-        # WARNING:  delete oldvalues: 'idkey7'
-        # WARNING:  delete oldvalues: 'idkey1'
-        log_to_postgres("delete oldvalues: %r" % (oldvalues,), WARNING)
-        pass
+    def delete(self, oid):
+        # called once for each row to be deleted, with the oid value
+        # oid value is a json encoded '{"region": "us-west-2", "table_name": "fdwtest2", "partition_key": "pkey2", "sort_key": "skey2"}'
+        log_to_postgres("delete oid: %r" % (oid,), DEBUG)
+        oid = json.loads(oid)
+        self.pending_batch_write.append({
+            'region': oid['region'],
+            'table_name': oid['table_name'],
+            'Delete': {
+                'partition_key': oid['partition_key'],
+                'sort_key': oid.get('sort_key', not_found_sentinel),
+            }
+        })
 
-    def insert(self, values):
-        # WARNING:  insert values: {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
-        log_to_postgres("insert values: %r" % (values,), WARNING)
-        pass
+    def insert(self, value):
+        # called once for each value to be inserted, where the value is the structure of the dynamodb FDW table; eg.
+        # {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
+        log_to_postgres("insert row: %r" % (value,), DEBUG)
+        self.pending_batch_write.append({
+            'region': value['region'],
+            'table_name': value['table_name'],
+            'PutItem': {
+                'partition_key': value['partition_key'],
+                'sort_key': value['sort_key'],
+                'document': json.loads(value['document'])
+            }
+        })
 
     def update(self, oldvalues, newvalues):
         # WARNING:  update oldvalues: 'blahblah3', newvalues: {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'woot', 'sort_key': None, 'document': '{"id": "blahblah3", "string_set": ["s2", "s1", "s5"]}'}
         # WARNING:  update oldvalues: 'idkey2', newvalues: {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'woot', 'sort_key': None, 'document': '{"id": "idkey2", "number_column": 1234.5678}'}
         # WARNING:  update oldvalues: 'idkey7', newvalues: {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'woot', 'sort_key': None, 'document': '{"map_column": {"field1": "value1"}, "id": "idkey7"}'}
         # WARNING:  update oldvalues: 'idkey1', newvalues: {'region': 'us-west-2', 'table_name': 'fdwtest', 'partition_key': 'woot', 'sort_key': None, 'document': '{"string_column": "This is a string column", "id": "idkey1"}'}
-        log_to_postgres("update oldvalues: %r, newvalues: %r" % (oldvalues, newvalues), WARNING)
+        log_to_postgres("update oldvalues: %r, newvalues: %r" % (oldvalues, newvalues), DEBUG)
+        log_to_postgres("UPDATE operation is not currently supported on DynamoDB FDW tables", ERROR)
         pass
 
     def begin(self, serializable):
-        # concept: create an empty batch write buffer
-        # FIXME: need to see if instances of this class are re-used across connections?  Is buffering in `self` safe?
-        log_to_postgres("begin", WARNING)
-        pass
+        # create an empty batch write buffer
+        log_to_postgres("FDW transaction BEGIN", DEBUG)
+        self.pending_batch_write = []
 
     def pre_commit(self):
-        # concept: submit the batch write buffer
-        # FIXME: NOOP if the batch write buffer is empty, because pre_commit will be called even if no write operations have occurred
-        log_to_postgres("pre_commit", WARNING)
-        pass
+        # submit the batch write buffer to DynamoDB
+        log_to_postgres("pre_commit; %s write operations in buffer" % (len(self.pending_batch_write)), DEBUG)
+
+        # NOOP if the batch write buffer is empty, because pre_commit will be called even if no write operations have occurred
+        if len(self.pending_batch_write) == 0:
+            return
+
+        # group all the pending batch writes by region & table
+        by_region = {}
+        for write in self.pending_batch_write:
+            region = write['region']
+            table_name = write['table_name']
+            within_region = by_region.setdefault(region, {})
+            within_table = within_region.setdefault(table_name, [])
+            within_table.append(write)
+         
+        for region, tables in by_region.items():
+            for table_name, items in tables.items():
+                log_to_postgres("pre_commit; %s writes to perform to table %s in region %s" % (len(items), table_name, region), WARNING)
+                table = get_table(region, table_name)
+                
+                key_schema = table.key_schema
+                partition_key_attr_name = None
+                sort_key_attr_name = None
+                for key in key_schema:
+                    if key['KeyType'] == 'HASH':
+                        partition_key_attr_name = key['AttributeName']
+                    elif key['KeyType'] == 'RANGE':
+                        sort_key_attr_name = key['AttributeName']
+                if partition_key_attr_name == None:
+                    log_to_postgres("unable to find partition key in key_schema for table %s" % (table_name,), ERROR)
+
+                with table.batch_writer() as batch:
+                    for item in items:
+                        item_del_op = item.get('Delete', not_found_sentinel)
+                        if item_del_op is not not_found_sentinel:
+                            delete_key = {}
+                            delete_key[partition_key_attr_name] = item_del_op['partition_key']
+                            skey = item_del_op['sort_key']
+                            if skey is not not_found_sentinel:
+                                if sort_key_attr_name == None:
+                                    log_to_postgres("unable to find sort key in key_schema for table %s" % (table_name,), ERROR)
+                                delete_key[sort_key_attr_name] = skey
+                            batch.delete_item(Key=delete_key)
+
+                        item_ins_op = item.get('PutItem', not_found_sentinel)
+                        if item_ins_op is not not_found_sentinel:
+                            put_item = {}
+                            put_item.update(item_ins_op['document'])
+                            put_item[partition_key_attr_name] = item_ins_op['partition_key']
+                            skey = item_ins_op['sort_key']
+                            if skey is not None:
+                                if sort_key_attr_name == None:
+                                    log_to_postgres("unable to find sort key in key_schema for table %s" % (table_name,), ERROR)
+                                put_item[sort_key_attr_name] = skey
+                            batch.put_item(Item=put_item)
+
+        self.pending_batch_write = []
 
     def rollback(self):
-        # concept: discard teh batch write buffer
-        log_to_postgres("rollback", WARNING)
-        pass
+        # discard the batch write buffer
+        log_to_postgres("FDW rollback; clearing %s write operations from buffer" % (len(self.pending_batch_write)), DEBUG)
+        self.pending_batch_write = []
 
