@@ -3,7 +3,7 @@ import os
 
 setup(
     name='DynamodbFdw',
-    version='mf-0.2.0',
+    version='0.2.0',
     author='Mathieu Fenniak',
     author_email='mathieu@fenniak.net',
     packages=['dynamodbfdw'],
