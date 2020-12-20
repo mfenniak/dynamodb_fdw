@@ -1,13 +1,11 @@
 from multicorn import ForeignDataWrapper
-from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG
+from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
 import boto3
 import simplejson as json
 import decimal
 
 # "MVP" List:
-# support insert
-# support delete
 # write up a single "start docker container"
 # push docker container to docker hub
 # (CI docker push?)
@@ -114,6 +112,7 @@ class DynamoFdw(ForeignDataWrapper):
 
     Expected/required table schema:
     CREATE FOREIGN TABLE dynamodb (
+        oid TEXT,
         region TEXT,
         table_name TEXT,
         partition_key TEXT,
@@ -145,21 +144,19 @@ class DynamoFdw(ForeignDataWrapper):
         return not_found_sentinel # None is a valid qual.value; so we don't use None here
 
     def execute(self, quals, columns):
-        log_to_postgres("quals repr: %r" % (quals,), WARNING)
-        log_to_postgres("columns repr: %r" % (columns,), WARNING)
+        log_to_postgres("quals repr: %r" % (quals,), DEBUG)
+        log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
         aws_region = self.get_required_exact_field(quals, 'region')
         table_name = self.get_required_exact_field(quals, 'table_name')
 
         table = get_table(aws_region, table_name)
         key_schema = table.key_schema # cache; not sure if this causes API calls on every access
-        # log_to_postgres("key_schema repr: %r" % (key_schema,), WARNING)
 
         query_params = None
-
         partition_key_value = self.get_optional_exact_field(quals, 'partition_key')
         if partition_key_value is not not_found_sentinel:
-            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), WARNING)
+            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
             query_params = {
                 'KeyConditions': {}
             }
@@ -173,6 +170,10 @@ class DynamoFdw(ForeignDataWrapper):
             else:
                 raise Exception('unable to find hash key in key_schema')
 
+        local_count = 0
+        scanned_count = 0
+        page_count = 0
+
         last_evaluated_key = None
         while True:
             if query_params is not None:
@@ -180,14 +181,20 @@ class DynamoFdw(ForeignDataWrapper):
                 my_query_params.update(query_params)
                 if last_evaluated_key is not None:
                     my_query_params['ExclusiveStartKey'] = last_evaluated_key
-                log_to_postgres("performing QUERY operation: %r" % (my_query_params,), WARNING)
+                log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
                 resp = table.query(**my_query_params)
             else:
                 my_scan_params = {}
                 if last_evaluated_key is not None:
                     my_scan_params['ExclusiveStartKey'] = last_evaluated_key
-                log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), WARNING)
+                else:
+                    log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
+                log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
                 resp = table.scan(**my_scan_params)
+
+            scanned_count += resp['ScannedCount']
+            local_count += resp['Count']
+            page_count += 1
 
             data_page = resp['Items']
             for ddb_row in data_page:
@@ -207,9 +214,11 @@ class DynamoFdw(ForeignDataWrapper):
                 yield pg_row
 
             last_evaluated_key = resp.get('LastEvaluatedKey')
-            log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), WARNING)
+            log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
             if last_evaluated_key is None:
                 break
+
+        log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
     
     def delete(self, oid):
         # called once for each row to be deleted, with the oid value
@@ -272,7 +281,7 @@ class DynamoFdw(ForeignDataWrapper):
          
         for region, tables in by_region.items():
             for table_name, items in tables.items():
-                log_to_postgres("pre_commit; %s writes to perform to table %s in region %s" % (len(items), table_name, region), WARNING)
+                log_to_postgres("pre_commit; %s writes to perform to table %s in region %s" % (len(items), table_name, region), DEBUG)
                 table = get_table(region, table_name)
                 
                 key_schema = table.key_schema
@@ -317,4 +326,3 @@ class DynamoFdw(ForeignDataWrapper):
         # discard the batch write buffer
         log_to_postgres("FDW rollback; clearing %s write operations from buffer" % (len(self.pending_batch_write)), DEBUG)
         self.pending_batch_write = []
-
