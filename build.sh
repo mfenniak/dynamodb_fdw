@@ -20,5 +20,5 @@ then
         -H "Content-Type: application/json" \
         --data "{\"tag_name\":\"$CODEBUILD_BUILD_NUMBER\",\"name\":\"$CODEBUILD_BUILD_NUMBER\",\"target_commitish\":\"$CODEBUILD_RESOLVED_SOURCE_VERSION\" }" \
         -u $GITHUB_USER:$GITHUB_TOKEN \
-        https://@api.github.com/repos/mfenniak/dynamodb_fdw/releases
+        https://api.github.com/repos/mfenniak/dynamodb_fdw/releases
 fi
