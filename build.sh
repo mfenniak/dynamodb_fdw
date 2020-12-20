@@ -10,6 +10,8 @@ docker build -f Dockerfile -t mfenniak/dynamodb_fdw:${CODEBUILD_BUILD_NUMBER} .
 
 if [ "$CODEBUILD_WEBHOOK_TRIGGER" == "branch/main" ];
 then
+    docker login mfenniak -p $DOCKER_PASS
+
     docker tag mfenniak/dynamodb_fdw:${CODEBUILD_BUILD_NUMBER} mfenniak/dynamodb_fdw:latest
     docker push mfenniak/dynamodb_fdw:${CODEBUILD_BUILD_NUMBER}
     docker push mfenniak/dynamodb_fdw:latest
