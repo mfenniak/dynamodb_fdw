@@ -6,8 +6,6 @@ import simplejson as json
 import decimal
 
 # "MVP" List:
-#
-# support paginated results from Query & Scan
 # support insert
 # support delete
 # put error in place for update
@@ -21,10 +19,8 @@ import decimal
 # reduce logging from WARNING
 #
 # Future:
-#
 # support multiple partition key values in a Query, rather than just one exact value
 # Somehow support secondary indexes
-# do we get anything about 'LIMIT' ops in the quals, and can we pass that to scan & query?
 # support multiple parallel scan operations if we can?
 # send upstream sort key searches as part of query -- with support for EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN
 # not sure, but Query might support EQ | LE | LT | GE | GT | BEGINS_WITH | BETWEEN on partition keys as well -- we could use Query in more than just EQ case
@@ -179,36 +175,43 @@ class DynamoFdw(ForeignDataWrapper):
             else:
                 raise Exception('unable to find hash key in key_schema')
 
-        if query_params is not None:
-            log_to_postgres("performing QUERY operation: %r" % (query_params,), WARNING)
-            data_page = table.query(**query_params)['Items']
-        else:
-            log_to_postgres("performing SCAN operation", WARNING)
-            data_page = table.scan()['Items']
+        last_evaluated_key = None
+        while True:
+            if query_params is not None:
+                my_query_params = {}
+                my_query_params.update(query_params)
+                if last_evaluated_key is not None:
+                    my_query_params['ExclusiveStartKey'] = last_evaluated_key
+                log_to_postgres("performing QUERY operation: %r" % (my_query_params,), WARNING)
+                resp = table.query(**my_query_params)
+            else:
+                my_scan_params = {}
+                if last_evaluated_key is not None:
+                    my_scan_params['ExclusiveStartKey'] = last_evaluated_key
+                log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), WARNING)
+                resp = table.scan(**my_scan_params)
 
-        # FIXME: pagination of results
-        # query: LastEvaluatedKey & ExclusiveStartKey
+            data_page = resp['Items']
+            for ddb_row in data_page:
+                pg_row = {
+                    'region': aws_region,
+                    'table_name': table_name,
+                }
+                for key in key_schema:
+                    if key['KeyType'] == 'HASH':
+                        pg_row['partition_key'] = ddb_row[key['AttributeName']]
+                    elif key['KeyType'] == 'RANGE':
+                        pg_row['sort_key'] = ddb_row[key['AttributeName']]
+                # at this point, pg_row contains all the unique identifiers of the row... which... is exactly what oid needs to contain
+                pg_row['oid'] = json.dumps(pg_row)
+                # FIXME: should I remove the keys from the document, so that they can't be used for conditions that won't be translated to queries?
+                pg_row['document'] = json.dumps(ddb_row, cls=MyJsonEncoder)
+                yield pg_row
 
-        for ddb_row in data_page:
-            pg_row = {
-                'region': aws_region,
-                'table_name': table_name,
-            }
-
-            for key in key_schema:
-                if key['KeyType'] == 'HASH':
-                    pg_row['partition_key'] = ddb_row[key['AttributeName']]
-                elif key['KeyType'] == 'RANGE':
-                    # FIXME: untested
-                    pg_row['sort_key'] = ddb_row[key['AttributeName']]
-
-            # at this point, pg_row contains all the unique identifiers of the row... which... is exactly what oid needs to contain
-            pg_row['oid'] = json.dumps(pg_row)
-
-            # FIXME: should I remove the keys from the document, so that they can't be used for conditions that won't be translated to queries?
-            pg_row['document'] = json.dumps(ddb_row, cls=MyJsonEncoder)
-
-            yield pg_row
+            last_evaluated_key = resp.get('LastEvaluatedKey')
+            log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), WARNING)
+            if last_evaluated_key is None:
+                break
     
     def delete(self, oldvalues):
         # WARNING:  delete oldvalues: 'blahblah3'
