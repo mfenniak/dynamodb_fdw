@@ -27,77 +27,6 @@ def get_table(aws_region, table_name):
     table = dynamodb.Table(table_name)
     return table
 
-# Probably not doable: concept for automatically creating views w/ more easily accessible document structure
-# I though I could automatically generate a view that has a typed definition for the table.  But DynamoDB columns
-# can vary types between different records (excluding the paritition & sort keys), and DynamoDB doesn't provide
-# metadata on the attributes and their types defined in the table.  So; I think this idea is dead, but I kept
-# around the code for a bit in case something else comes to my mind here.
-#
-# def make_column(plpy, attr, src):
-#     attr_type = attr['AttributeType']
-#     attr_name = attr['AttributeName']
-#     if attr_type == 'N':
-#         src = '(%s)::numeric' % src
-#     elif attr_type == 'B':
-#         raise Exception('binary field types not supported yet')
-#     # FIXME: other attr_type here
-#     return '%s as %s' % (src, plpy.quote_ident(attr_name))
-# 
-# def find_attr(attribute_definitions, attr_name):
-#     for pot_attr in attribute_definitions:
-#         if pot_attr['AttributeName'] == attr_name:
-#             return pot_attr
-#     raise Exception('unable to find definition of HASH key attribute')
-# 
-# def define_dynamodb(plpy, aws_region, table_name):
-#     table = get_table(aws_region, table_name)
-#     view_name = table.table_name
-# 
-#     columns = []
-#     key_attributes = set()
-# 
-#     for key in table.key_schema:
-#         if key['KeyType'] == 'HASH':
-#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
-#             if attr['AttributeType'] != 'S':
-#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
-#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
-#                 raise Exception('only string partition keys are currently supported')
-#             key_attributes.add(key['AttributeName'])
-#             columns.append(make_column(plpy, attr, 'partition_key'))
-#         elif key['KeyType'] == 'RANGE':
-#             # FIXME: untested
-#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
-#             if attr['AttributeType'] != 'S':
-#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
-#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
-#                 raise Exception('only string sort keys are currently supported')
-#             key_attributes.add(key['AttributeName'])
-#             columns.append(make_column(plpy, attr, 'sort_key'))
-# 
-#     plpy.warning("attribute_definitions: %r" % table.attribute_definitions)
-#     for attr in table.attribute_definitions:
-#         attr_name = attr['AttributeName']
-#         if attr_name in key_attributes:
-#             # don't define them twice
-#             continue
-#         columns.append(make_column(plpy, attr, 'document->>[%s]' % plpy.quote_literal(attr_name)))
-# 
-#     sql = "CREATE VIEW %s AS SELECT " % plpy.quote_ident(view_name)
-#     for c in columns:
-#         sql += c
-#         sql += ","
-#     sql = sql[:-1]
-#     sql += " FROM dynamodb WHERE "
-#     sql += "region = %s AND " % plpy.quote_literal(aws_region)
-#     sql += "table_name = %s" % plpy.quote_literal(table_name)
-#     plpy.warning("sql: %r" % sql)
-# 
-#     plpy.execute("DROP VIEW IF EXISTS %s" % plpy.quote_ident(view_name))
-#     plpy.execute(sql)
-# 
-#     return view_name
-
 class MyJsonEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, set):
@@ -326,3 +255,85 @@ class DynamoFdw(ForeignDataWrapper):
         # discard the batch write buffer
         log_to_postgres("FDW rollback; clearing %s write operations from buffer" % (len(self.pending_batch_write)), DEBUG)
         self.pending_batch_write = []
+
+# Probably not doable: concept for automatically creating views w/ more easily accessible document structure
+# I though I could automatically generate a view that has a typed definition for the table.  But DynamoDB columns
+# can vary types between different records (excluding the paritition & sort keys), and DynamoDB doesn't provide
+# metadata on the attributes and their types defined in the table.  So; I think this idea is dead, but I kept
+# around the code for a bit in case something else comes to my mind here.
+#
+# Probably not doable: concept for automatically creating views w/ more easily accessible document structure
+# psql -h localhost postgres postgres -c "CREATE EXTENSION plpython3u"
+# psql -h localhost postgres postgres -c 'CREATE FUNCTION define_dynamodb(aws_region text, table_name text)
+#   RETURNS text
+# AS $$
+# from dynamodbfdw.dynamodbfdw import define_dynamodb
+# return define_dynamodb(plpy, aws_region, table_name)
+# $$ LANGUAGE plpython3u;'
+# psql -h localhost postgres postgres -c "select define_dynamodb('us-west-2', 'citrousca-deadmans-switch')"
+# psql -h localhost postgres postgres -c "select define_dynamodb('us-west-2', 'fdwtest')"
+#
+# def make_column(plpy, attr, src):
+#     attr_type = attr['AttributeType']
+#     attr_name = attr['AttributeName']
+#     if attr_type == 'N':
+#         src = '(%s)::numeric' % src
+#     elif attr_type == 'B':
+#         raise Exception('binary field types not supported yet')
+#     # FIXME: other attr_type here
+#     return '%s as %s' % (src, plpy.quote_ident(attr_name))
+# 
+# def find_attr(attribute_definitions, attr_name):
+#     for pot_attr in attribute_definitions:
+#         if pot_attr['AttributeName'] == attr_name:
+#             return pot_attr
+#     raise Exception('unable to find definition of HASH key attribute')
+# 
+# def define_dynamodb(plpy, aws_region, table_name):
+#     table = get_table(aws_region, table_name)
+#     view_name = table.table_name
+# 
+#     columns = []
+#     key_attributes = set()
+# 
+#     for key in table.key_schema:
+#         if key['KeyType'] == 'HASH':
+#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
+#             if attr['AttributeType'] != 'S':
+#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
+#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
+#                 raise Exception('only string partition keys are currently supported')
+#             key_attributes.add(key['AttributeName'])
+#             columns.append(make_column(plpy, attr, 'partition_key'))
+#         elif key['KeyType'] == 'RANGE':
+#             # FIXME: untested
+#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
+#             if attr['AttributeType'] != 'S':
+#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
+#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
+#                 raise Exception('only string sort keys are currently supported')
+#             key_attributes.add(key['AttributeName'])
+#             columns.append(make_column(plpy, attr, 'sort_key'))
+# 
+#     plpy.warning("attribute_definitions: %r" % table.attribute_definitions)
+#     for attr in table.attribute_definitions:
+#         attr_name = attr['AttributeName']
+#         if attr_name in key_attributes:
+#             # don't define them twice
+#             continue
+#         columns.append(make_column(plpy, attr, 'document->>[%s]' % plpy.quote_literal(attr_name)))
+# 
+#     sql = "CREATE VIEW %s AS SELECT " % plpy.quote_ident(view_name)
+#     for c in columns:
+#         sql += c
+#         sql += ","
+#     sql = sql[:-1]
+#     sql += " FROM dynamodb WHERE "
+#     sql += "region = %s AND " % plpy.quote_literal(aws_region)
+#     sql += "table_name = %s" % plpy.quote_literal(table_name)
+#     plpy.warning("sql: %r" % sql)
+# 
+#     plpy.execute("DROP VIEW IF EXISTS %s" % plpy.quote_ident(view_name))
+#     plpy.execute(sql)
+# 
+#     return view_name

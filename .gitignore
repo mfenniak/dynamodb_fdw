@@ -4,3 +4,5 @@ UNKNOWN.egg-info/
 dist/
 dump.sql
 build/
+fire-up.sh
+test-pgpass
