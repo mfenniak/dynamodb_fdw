@@ -19,5 +19,6 @@ then
     curl -f -v -X POST \
         -H "Content-Type: application/json" \
         --data "{\"tag_name\":\"$CODEBUILD_BUILD_NUMBER\",\"name\":\"$CODEBUILD_BUILD_NUMBER\",\"target_commitish\":\"$CODEBUILD_RESOLVED_SOURCE_VERSION\" }" \
-        https://$GITHUB_USER:$GITHUB_TOKEN@api.github.com/repos/mfenniak/dynamodb_fdw/releases
+        -u $GITHUB_USER:$GITHUB_TOKEN \
+        https://@api.github.com/repos/mfenniak/dynamodb_fdw/releases
 fi
