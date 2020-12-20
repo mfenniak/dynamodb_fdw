@@ -1,13 +1,17 @@
-from multicorn import ForeignDataWrapper
+from multicorn import ForeignDataWrapper, TableDefinition, ColumnDefinition
 from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
 import boto3
 import simplejson as json
 import decimal
 
-def get_table(aws_region, table_name):
+def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
     dynamodb = boto3.resource('dynamodb', config=boto_config)
+    return dynamodb
+
+def get_table(aws_region, table_name):
+    dynamodb = get_dynamodb(aws_region)
     table = dynamodb.Table(table_name)
     return table
 
@@ -34,6 +38,40 @@ class DynamoFdw(ForeignDataWrapper):
         table_name 'remote_table'
     )
     """
+
+    @classmethod
+    def import_schema(self, schema, srv_options, options, restriction_type, restricts):
+        log_to_postgres("schema repr: %r" % (schema,), DEBUG)
+        log_to_postgres("srv_options repr: %r" % (srv_options,), DEBUG)
+        log_to_postgres("options repr: %r" % (options,), DEBUG)
+        log_to_postgres("restriction_type repr: %r" % (restriction_type,), DEBUG)
+        log_to_postgres("restricts repr: %r" % (restricts,), DEBUG)
+        # WARNING:  restriction_type repr: 'limit'  (or 'except', or None)
+        # WARNING:  restricts repr: ['table_a', 'table_b']
+
+        aws_region = options['aws_region']
+        dynamodb = get_dynamodb(aws_region)
+        for table in dynamodb.tables.all():
+            if restriction_type == 'limit':
+                if table.name not in restricts:
+                    continue
+            elif restriction_type == 'except':
+                if table.name in restricts:
+                    continue
+            yield TableDefinition(table.name,
+                columns=[
+                    ColumnDefinition('oid', type_name='TEXT'),
+                    ColumnDefinition('partition_key', type_name='TEXT'),
+                    ColumnDefinition('sort_key', type_name='TEXT'),
+                    ColumnDefinition('document', type_name='JSON'),
+                ],
+                options={
+                    'aws_region': aws_region,
+                    'table_name': table.name,
+                }
+            )
+
+        # return []
 
     def __init__(self, options, columns):
         super(DynamoFdw, self).__init__(options, columns)

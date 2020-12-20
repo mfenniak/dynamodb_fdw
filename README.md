@@ -37,7 +37,19 @@ docker run -d \
 
 Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used.
 
-Once running, you can con use any PostgreSQL client to access the DB and start running SQL.  Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  DynamoDB is a schema-less system except for the partition & sort keys; and dynamodb_fdw represents that accurately by providing most of the data in a `document` json field.  Your table schema should look like this:
+Once running, you can con use any PostgreSQL client to access the DB and start running SQL.
+
+Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  You can do this very quickly by using the [IMPORT FOREIGN SCHEMA](https://www.postgresql.org/docs/12/sql-importforeignschema.html) functionality.  In the below example, the PG schema ddb_usw2 is created, and all DynamoDB tables in the us-west-2 region are imported into that schema:
+
+```
+CREATE SCHEMA ddb_usw2;
+IMPORT FOREIGN SCHEMA dynamodb
+    FROM SERVER multicorn_dynamo
+    INTO ddb_usw2
+    OPTIONS ( aws_region 'us-west-2' );
+```
+
+DynamoDB is a schema-less system except for the partition & sort keys.  dynamodb_fdw represents that accurately by providing most of the data in a `document` json field.  Your table schema, either imported, or manually created if you like, would look like this:
 
 ```
 CREATE FOREIGN TABLE fdwtest2 (
