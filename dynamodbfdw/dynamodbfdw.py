@@ -1,6 +1,8 @@
 from multicorn import ForeignDataWrapper, TableDefinition, ColumnDefinition
 from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
+from collections import namedtuple
+from functools import lru_cache
 import boto3
 import simplejson as json
 import decimal
@@ -22,6 +24,7 @@ class MyJsonEncoder(json.JSONEncoder):
         return super().default(o)
 
 not_found_sentinel = object()
+KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 
 class DynamoFdw(ForeignDataWrapper):
     """
@@ -30,9 +33,9 @@ class DynamoFdw(ForeignDataWrapper):
     Expected/required table schema:
     CREATE FOREIGN TABLE dynamodb (
         oid TEXT,
-        partition_key TEXT,
-        sort_key TEXT,
-        document JSON NOT NULL
+        partition_key TEXT OPTIONS ( partition_key 'id' ),
+        sort_key TEXT OPTIONS ( sort_key 'skey' ),
+        document JSON OPTIONS ( ddb_document 'true' )
     ) server multicorn_dynamo OPTIONS (
         aws_region 'us-west-2',
         table_name 'remote_table'
@@ -46,8 +49,8 @@ class DynamoFdw(ForeignDataWrapper):
         log_to_postgres("options repr: %r" % (options,), DEBUG)
         log_to_postgres("restriction_type repr: %r" % (restriction_type,), DEBUG)
         log_to_postgres("restricts repr: %r" % (restricts,), DEBUG)
-        # WARNING:  restriction_type repr: 'limit'  (or 'except', or None)
-        # WARNING:  restricts repr: ['table_a', 'table_b']
+        # restriction_type repr: 'limit'  (or 'except', or None)
+        # restricts repr: ['table_a', 'table_b']
 
         aws_region = options['aws_region']
         dynamodb = get_dynamodb(aws_region)
@@ -58,20 +61,29 @@ class DynamoFdw(ForeignDataWrapper):
             elif restriction_type == 'except':
                 if table.name in restricts:
                     continue
+            columns = [
+                ColumnDefinition('oid', type_name='TEXT'),
+            ]
+            for key in table.key_schema:
+                # FIXME: only string partition/sort keys supported currently
+                if key['KeyType'] == 'HASH':
+                    columns.append(
+                        ColumnDefinition(key['AttributeName'], type_name='TEXT', options={'partition_key': key['AttributeName']})
+                    )
+                elif key['KeyType'] == 'RANGE':
+                    columns.append(
+                        ColumnDefinition(key['AttributeName'], type_name='TEXT', options={'sort_key': key['AttributeName']})
+                    )
+            columns.append(
+                ColumnDefinition('document', type_name='JSON', options={'ddb_document': 'true'})
+            )
             yield TableDefinition(table.name,
-                columns=[
-                    ColumnDefinition('oid', type_name='TEXT'),
-                    ColumnDefinition('partition_key', type_name='TEXT'),
-                    ColumnDefinition('sort_key', type_name='TEXT'),
-                    ColumnDefinition('document', type_name='JSON'),
-                ],
+                columns=columns,
                 options={
                     'aws_region': aws_region,
                     'table_name': table.name,
                 }
             )
-
-        # return []
 
     def __init__(self, options, columns):
         super(DynamoFdw, self).__init__(options, columns)
@@ -79,17 +91,41 @@ class DynamoFdw(ForeignDataWrapper):
         self.table_name = options['table_name']
         self.columns = columns
         self.pending_batch_write = []
-        # FIXME: validate that the columns are exactly as expected, maybe?
+        if self.partition_key is not_found_sentinel:
+            log_to_postgres("DynamoDB FDW table must have a column w/ partition_key option", ERROR)
+        if self.document_field is not_found_sentinel:
+            log_to_postgres("DynamoDB FDW table must have a column w/ ddb_document option", ERROR)
 
     @property
     def rowid_column(self):
         return 'oid'
 
-    def get_required_exact_field(self, quals, field):
-        value = self.get_optional_exact_field(quals, field)
-        if value is not_found_sentinel:
-            log_to_postgres("You must query for a specific target %s" % field, ERROR)
-        return value
+    @property
+    @lru_cache()
+    def partition_key(self):
+        for cname, column in self.columns.items():
+            pkey = column.options.get('partition_key', None)
+            if pkey is not None:
+                return KeyField(pg_field_name=column.column_name, ddb_field_name=pkey)
+        return not_found_sentinel
+
+    @property
+    @lru_cache()
+    def sort_key(self):
+        for cname, column in self.columns.items():
+            skey = column.options.get('sort_key', None)
+            if skey is not None:
+                return KeyField(pg_field_name=column.column_name, ddb_field_name=skey)
+        return not_found_sentinel
+
+    @property
+    @lru_cache()
+    def document_field(self):
+        for cname, column in self.columns.items():
+            ddb_document = column.options.get('ddb_document', None)
+            if ddb_document is not None:
+                return KeyField(pg_field_name=column.column_name, ddb_field_name=None)
+        return not_found_sentinel
 
     def get_optional_exact_field(self, quals, field):
         for qual in quals:
@@ -100,26 +136,21 @@ class DynamoFdw(ForeignDataWrapper):
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
+        log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
         table = get_table(self.aws_region, self.table_name)
-        key_schema = table.key_schema # cache; not sure if this causes API calls on every access
 
         query_params = None
-        partition_key_value = self.get_optional_exact_field(quals, 'partition_key')
+        partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
         if partition_key_value is not not_found_sentinel:
             log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
             query_params = {
                 'KeyConditions': {}
             }
-            for key in key_schema:
-                if key['KeyType'] == 'HASH':
-                    query_params['KeyConditions'][key['AttributeName']] = {
-                        'AttributeValueList': [partition_key_value],
-                        'ComparisonOperator': 'EQ',
-                    }
-                    break
-            else:
-                raise Exception('unable to find hash key in key_schema')
+            query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
+                'AttributeValueList': [partition_key_value],
+                'ComparisonOperator': 'EQ',
+            }
 
         local_count = 0
         scanned_count = 0
@@ -151,15 +182,12 @@ class DynamoFdw(ForeignDataWrapper):
                 data_page = resp['Items']
                 for ddb_row in data_page:
                     pg_row = {}
-                    for key in key_schema:
-                        if key['KeyType'] == 'HASH':
-                            pg_row['partition_key'] = ddb_row[key['AttributeName']]
-                        elif key['KeyType'] == 'RANGE':
-                            pg_row['sort_key'] = ddb_row[key['AttributeName']]
-                    # at this point, pg_row contains all the unique identifiers of the row... which... is exactly what oid needs to contain
+                    pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
+                    if self.sort_key is not not_found_sentinel:
+                        pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
+                    # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
                     pg_row['oid'] = json.dumps(pg_row)
-                    # FIXME: should I remove the keys from the document, so that they can't be used for conditions that won't be translated to queries?
-                    pg_row['document'] = json.dumps(ddb_row, cls=MyJsonEncoder)
+                    pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
                     yield pg_row
 
                 last_evaluated_key = resp.get('LastEvaluatedKey')
@@ -167,31 +195,33 @@ class DynamoFdw(ForeignDataWrapper):
                 if last_evaluated_key is None:
                     break
         finally:
-            # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause
+            # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
             log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
     
     def delete(self, oid):
         # called once for each row to be deleted, with the oid value
-        # oid value is a json encoded '{"partition_key": "pkey2", "sort_key": "skey2"}'
+        # oid value is a json encoded '{"pg_partition_key": "pkey2", "pg_sort_key": "skey2"}'
         log_to_postgres("delete oid: %r" % (oid,), DEBUG)
         oid = json.loads(oid)
+        delete_item = {}
+        delete_item[self.partition_key.ddb_field_name] = oid[self.partition_key.pg_field_name]
+        if self.sort_key is not not_found_sentinel:
+            delete_item[self.sort_key.ddb_field_name] = oid[self.sort_key.pg_field_name]
         self.pending_batch_write.append({
-            'Delete': {
-                'partition_key': oid['partition_key'],
-                'sort_key': oid.get('sort_key', not_found_sentinel),
-            }
+            'Delete': delete_item
         })
 
     def insert(self, value):
         # called once for each value to be inserted, where the value is the structure of the dynamodb FDW table; eg.
         # {'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
         log_to_postgres("insert row: %r" % (value,), DEBUG)
+        put_item = {}
+        put_item.update(json.loads(value[self.document_field.pg_field_name]))
+        put_item[self.partition_key.ddb_field_name] = value[self.partition_key.pg_field_name]
+        if self.sort_key is not not_found_sentinel:
+            put_item[self.sort_key.ddb_field_name] = value[self.sort_key.pg_field_name]
         self.pending_batch_write.append({
-            'PutItem': {
-                'partition_key': value['partition_key'],
-                'sort_key': value['sort_key'],
-                'document': json.loads(value['document'])
-            }
+            'PutItem': put_item
         })
 
     def update(self, oldvalues, newvalues):
@@ -217,42 +247,14 @@ class DynamoFdw(ForeignDataWrapper):
             return
 
         table = get_table(self.aws_region, self.table_name)
-        
-        key_schema = table.key_schema
-        partition_key_attr_name = None
-        sort_key_attr_name = None
-        for key in key_schema:
-            if key['KeyType'] == 'HASH':
-                partition_key_attr_name = key['AttributeName']
-            elif key['KeyType'] == 'RANGE':
-                sort_key_attr_name = key['AttributeName']
-        if partition_key_attr_name == None:
-            log_to_postgres("unable to find partition key in key_schema for table %s" % (table_name,), ERROR)
-
         with table.batch_writer() as batch:
             for item in self.pending_batch_write:
                 item_del_op = item.get('Delete', not_found_sentinel)
                 if item_del_op is not not_found_sentinel:
-                    delete_key = {}
-                    delete_key[partition_key_attr_name] = item_del_op['partition_key']
-                    skey = item_del_op['sort_key']
-                    if skey is not not_found_sentinel:
-                        if sort_key_attr_name == None:
-                            log_to_postgres("unable to find sort key in key_schema for table %s" % (table_name,), ERROR)
-                        delete_key[sort_key_attr_name] = skey
-                    batch.delete_item(Key=delete_key)
-
+                    batch.delete_item(Key=item_del_op)
                 item_ins_op = item.get('PutItem', not_found_sentinel)
                 if item_ins_op is not not_found_sentinel:
-                    put_item = {}
-                    put_item.update(item_ins_op['document'])
-                    put_item[partition_key_attr_name] = item_ins_op['partition_key']
-                    skey = item_ins_op['sort_key']
-                    if skey is not None:
-                        if sort_key_attr_name == None:
-                            log_to_postgres("unable to find sort key in key_schema for table %s" % (table_name,), ERROR)
-                        put_item[sort_key_attr_name] = skey
-                    batch.put_item(Item=put_item)
+                    batch.put_item(Item=item_ins_op)
 
         self.pending_batch_write = []
 
@@ -260,85 +262,3 @@ class DynamoFdw(ForeignDataWrapper):
         # discard the batch write buffer
         log_to_postgres("FDW rollback; clearing %s write operations from buffer" % (len(self.pending_batch_write)), DEBUG)
         self.pending_batch_write = []
-
-# Probably not doable: concept for automatically creating views w/ more easily accessible document structure
-# I though I could automatically generate a view that has a typed definition for the table.  But DynamoDB columns
-# can vary types between different records (excluding the paritition & sort keys), and DynamoDB doesn't provide
-# metadata on the attributes and their types defined in the table.  So; I think this idea is dead, but I kept
-# around the code for a bit in case something else comes to my mind here.
-#
-# Probably not doable: concept for automatically creating views w/ more easily accessible document structure
-# psql -h localhost postgres postgres -c "CREATE EXTENSION plpython3u"
-# psql -h localhost postgres postgres -c 'CREATE FUNCTION define_dynamodb(aws_region text, table_name text)
-#   RETURNS text
-# AS $$
-# from dynamodbfdw.dynamodbfdw import define_dynamodb
-# return define_dynamodb(plpy, aws_region, table_name)
-# $$ LANGUAGE plpython3u;'
-# psql -h localhost postgres postgres -c "select define_dynamodb('us-west-2', 'citrousca-deadmans-switch')"
-# psql -h localhost postgres postgres -c "select define_dynamodb('us-west-2', 'fdwtest')"
-#
-# def make_column(plpy, attr, src):
-#     attr_type = attr['AttributeType']
-#     attr_name = attr['AttributeName']
-#     if attr_type == 'N':
-#         src = '(%s)::numeric' % src
-#     elif attr_type == 'B':
-#         raise Exception('binary field types not supported yet')
-#     # FIXME: other attr_type here
-#     return '%s as %s' % (src, plpy.quote_ident(attr_name))
-# 
-# def find_attr(attribute_definitions, attr_name):
-#     for pot_attr in attribute_definitions:
-#         if pot_attr['AttributeName'] == attr_name:
-#             return pot_attr
-#     raise Exception('unable to find definition of HASH key attribute')
-# 
-# def define_dynamodb(plpy, aws_region, table_name):
-#     table = get_table(aws_region, table_name)
-#     view_name = table.table_name
-# 
-#     columns = []
-#     key_attributes = set()
-# 
-#     for key in table.key_schema:
-#         if key['KeyType'] == 'HASH':
-#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
-#             if attr['AttributeType'] != 'S':
-#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
-#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
-#                 raise Exception('only string partition keys are currently supported')
-#             key_attributes.add(key['AttributeName'])
-#             columns.append(make_column(plpy, attr, 'partition_key'))
-#         elif key['KeyType'] == 'RANGE':
-#             # FIXME: untested
-#             attr = find_attr(table.attribute_definitions, key['AttributeName'])
-#             if attr['AttributeType'] != 'S':
-#                 # FIXME: To support non-string paritition keys, we're going to have to add multiple partition_key fields
-#                 # to the FDW table so that we can work with the correct Postgres types without casts; it's doable
-#                 raise Exception('only string sort keys are currently supported')
-#             key_attributes.add(key['AttributeName'])
-#             columns.append(make_column(plpy, attr, 'sort_key'))
-# 
-#     plpy.warning("attribute_definitions: %r" % table.attribute_definitions)
-#     for attr in table.attribute_definitions:
-#         attr_name = attr['AttributeName']
-#         if attr_name in key_attributes:
-#             # don't define them twice
-#             continue
-#         columns.append(make_column(plpy, attr, 'document->>[%s]' % plpy.quote_literal(attr_name)))
-# 
-#     sql = "CREATE VIEW %s AS SELECT " % plpy.quote_ident(view_name)
-#     for c in columns:
-#         sql += c
-#         sql += ","
-#     sql = sql[:-1]
-#     sql += " FROM dynamodb WHERE "
-#     sql += "region = %s AND " % plpy.quote_literal(aws_region)
-#     sql += "table_name = %s" % plpy.quote_literal(table_name)
-#     plpy.warning("sql: %r" % sql)
-# 
-#     plpy.execute("DROP VIEW IF EXISTS %s" % plpy.quote_ident(view_name))
-#     plpy.execute(sql)
-# 
-#     return view_name

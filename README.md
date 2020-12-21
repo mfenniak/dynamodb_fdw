@@ -36,7 +36,7 @@ docker run -d \
 
 Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  AWS credentials in this example were provided by sharing `$HOME/.aws` into the container, but can also be provided by any boto3 supported mechanism (eg. environment variables, instance profile metadata).  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used to customize the PostgreSQL server.
 
-Once running, you can con use any PostgreSQL client to access the DB and start running SQL.
+Once running, you can use any PostgreSQL client to access the DB and start running SQL.
 
 Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  You can do this very quickly by using the [IMPORT FOREIGN SCHEMA](https://www.postgresql.org/docs/12/sql-importforeignschema.html) functionality.  In the below example, the PG schema ddb_usw2 is created, and all DynamoDB tables in the us-west-2 region are imported into that schema:
 
@@ -53,24 +53,24 @@ DynamoDB is a schema-less system except for the partition & sort keys.  dynamodb
 ```
 CREATE FOREIGN TABLE fdwtest2 (
     oid TEXT,
-    partition_key TEXT,
-    sort_key TEXT,
-    document JSON NOT NULL
+    partition_key TEXT OPTIONS ( partition_key 'id' ),
+    sort_key TEXT OPTIONS ( sort_key 'skey' ),
+    document JSON OPTIONS ( ddb_document 'true' )
 ) SERVER multicorn_dynamo OPTIONS (
     aws_region 'us-west-2',
     table_name 'fdwtest2'
 )
 ```
 
-The fields in this table are:
+The fields in this example table are:
 - `oid`
-  - a composite primary key of `partition_key`, and `sort_key` used because multicorn (Python FDW wrapper) only supports a single column for write operations.  Basically, ignore this, though.
+  - Internal composite primary key of `partition_key`, and `sort_key`, used to support write operations.  It can be ignored; don't query it, and don't bother providing it when INSERTing into a table.
 - `partition_key`
-  - the partition key of the DynamoDB table.  Only string partition keys are supported currently.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.
+  - The partition key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string partition keys are supported currently.  The option `partition_key` must be set to the name of the partition key on the DynamoDB table.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.  One field marked with `partition_key` option must be present.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
 - `sort_key`
-  - the sort key of the DynamoDB table.  Only string sort keys are supported currently.
+  - The sort key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string sort keys are supported currently.  The option `sort_key` must be set to the name of the sort key on the DynamoDB table.  If the DynamoDB table has no sort key, this field can be omitted.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
 - `document`
-  - a JSON-structured version of the entire DynamoDB record.
+  - JSON-structured version of the entire DynamoDB record.  Any name can be used for the PostgreSQL column.  One field marked with the option `ddb_document` must be present.
 
 So, what can you do now?  Let's start simple, by querying a DynamoDB table:
 
@@ -127,7 +127,7 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 Cool, any PostgreSQL aggregation will work on DynamoDB data.  It could be very, very slow if the table is large... but it will work.  How about filtering based upon the contents of the DynamoDB table, rather than the keys?
 
 ```
-=> SELECT document FROM fdwtest2 
+=> SELECT document FROM fdwtest2
    WHERE document->>'text' = 'hello 453';
 WARNING:  DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible
 NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanned 2004 records server-side
@@ -162,7 +162,7 @@ DELETE 2
 INSERT 0 2
 ```
 
-DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write operations are even transaction-aware -- if you make modifications in a PostgreSQL transaction, then they will not be written to DynamoDB until the transaction is commited.  Atomic PostgreSQL & DynamoDB updates are not guaranteed.
+DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write operations are even transaction-aware -- if you make modifications in a PostgreSQL transaction, then they will not be written to DynamoDB until the transaction is committed.  Atomic PostgreSQL & DynamoDB updates are not guaranteed.
 
 ## Future Plans
 
@@ -181,4 +181,4 @@ This is a fork of Fabio Rueda's original DynamoDB FDW implementation, https://gi
 
 ## License
 
-dynamodb_fdw carries forward the GPL3 license of it's original implementation.
+dynamodb_fdw carries forward the GPL3 license of its original implementation.
