@@ -133,6 +133,87 @@ class DynamoFdw(ForeignDataWrapper):
                 return qual.value
         return not_found_sentinel # None is a valid qual.value; so we don't use None here
 
+    def compute_sort_key_condition(self, quals):
+        # DynamoDB supports these operators on sort keys in KeyConditionExpression:
+        # DynamoDB: EQ, PostgreSQL: =
+        # DynamoDB: LT, PostgreSQL: <
+        # DynamoDB: LE, PostgreSQL: <=
+        # DynamoDB: GT, PostgreSQL: >
+        # DynamoDB: GE, PostgreSQL: >=
+        # DynamoDB: BETWEEN, PostgreSQL: my_sort_key >= b, my_sort_key <= c
+        # DynamoDB: BEGINS_WITH, PostgreSQL: my_sort_key ~~ abc%
+
+        # Search for any conditions on the sort key; we support a max of two conditions, but only specific
+        # conditions... and return early with not_found_sentinel of more conditions are present.
+        check1, check2 = None, None
+        for qual in quals:
+            if qual.field_name == self.sort_key.pg_field_name:
+                if qual.operator == '<=':
+                    if check2 != None:
+                        # had multiple conditions; can't support that
+                        return not_found_sentinel
+                    check2 = qual
+                elif qual.operator in ('=', '<', '>', '>=', '~~'):
+                    if check1 != None:
+                        # had multiple conditions; can't support that
+                        return not_found_sentinel
+                    check1 = qual
+
+        # Looks like we could be a BETWEEN query...
+        if check1 is not None and check2 is not None:
+            # Only supported if it's >= and <=, because we can convert that to between
+            if check2.operator != '<=' or check1.operator != '>=':
+                return not_found_sentinel
+            return {
+                'ComparisonOperator': 'BETWEEN',
+                'AttributeValueList': [
+                    check1.value,
+                    check2.value,
+                ]
+            }
+
+        if check2 is not None:
+            # half a BETWEEN; we should only get here if check1 was None
+            check1 = check2
+
+        if check1 is not None:
+            op = check1.operator
+
+            if check1.operator == '~~':
+                # Can be converted into BEGINS_WITH if it only has a single % and it's at the end
+                # Also have to deal with the fact that there could be \% and \_ in the string -- escaped literals.
+
+                # First check if it's valid to convert to BEGINS_WITH.
+                pattern_without_escaped_wildcards = check1.value.replace("\\%", "").replace("\\_", "")
+                if not pattern_without_escaped_wildcards.endswith("%") or "_" in pattern_without_escaped_wildcards or "%" in pattern_without_escaped_wildcards[:-1]:
+                    # pattern not supported
+                    return not_found_sentinel
+
+                # Remove the trailing % wildcard, and convert the escaped literals to literals.
+                pattern_with_unescaped_wildcards = check1.value[:-1].replace("\\%", "%").replace("\\_", "_")
+                return {
+                    'ComparisonOperator': 'BEGINS_WITH',
+                    'AttributeValueList': [
+                        pattern_with_unescaped_wildcards
+                    ]
+                }
+
+            op = {
+                '=': 'EQ',
+                '<': 'LT',
+                '<=': 'LE',
+                '>': 'GT',
+                '>=': 'GE',
+            }
+            return {
+                'ComparisonOperator': op[check1.operator],
+                'AttributeValueList': [
+                    check1.value
+                ]
+            }
+
+        return not_found_sentinel
+
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
@@ -151,6 +232,13 @@ class DynamoFdw(ForeignDataWrapper):
                 'AttributeValueList': [partition_key_value],
                 'ComparisonOperator': 'EQ',
             }
+
+            if self.sort_key is not not_found_sentinel:
+                sort_key_cond = self.compute_sort_key_condition(quals)
+                log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
+                if sort_key_cond is not not_found_sentinel:
+                    query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
+        log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
 
         local_count = 0
         scanned_count = 0
