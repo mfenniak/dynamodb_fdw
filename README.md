@@ -67,8 +67,10 @@ The fields in this example table are:
   - Internal composite primary key of `partition_key`, and `sort_key`, used to support write operations.  It can be ignored; don't query it, and don't bother providing it when INSERTing into a table.
 - `partition_key`
   - The partition key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string partition keys are supported currently.  The option `partition_key` must be set to the name of the partition key on the DynamoDB table.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.  One field marked with `partition_key` option must be present.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
+  - One specific PostgreSQL query operation on the partition key will be translated into an optimized DynamoDB query; an exact match equality check on the partition key.
 - `sort_key`
   - The sort key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string sort keys are supported currently.  The option `sort_key` must be set to the name of the sort key on the DynamoDB table.  If the DynamoDB table has no sort key, this field can be omitted.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
+  - Specific PostgreSQL query operations on the sort key will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
 - `document`
   - JSON-structured version of the entire DynamoDB record.  Any name can be used for the PostgreSQL column.  One field marked with the option `ddb_document` must be present.
 
@@ -168,8 +170,7 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
-- Allow the "partition_key" and "sort_key" table fields to be renamed.
-- Currently only performs a "Query" operation when you do an exact search for a partition_key.  Some additional query operations could be supported; using the sort key, and supporting non-exact lookups.
+- Partition & sort key support is exactly one-to-one mapped with what is supported by DynamoDB.  However, dynamodb_fdw could break down the conditions and perform multiple queries that are joined together... for example, (partition_key = 'a' or partition_key = 'b') would result in a full table scan now, but it could result in two query operations instead.
 - Secondary indexes aren't ever used.  It seems possible to automatically match up query attempts with available secondary indexes.
 - "Scan" operations are done sequentially.  DynamoDB's API does support parallel scans, which could be implemented.
 - Most filtering is done by PostgreSQL, excluding the partition key query.  More filtering operations could be sent to DynamoDB to reduce the amount of data being retrieved.
