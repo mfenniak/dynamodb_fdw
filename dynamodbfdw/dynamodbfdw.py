@@ -6,6 +6,8 @@ from functools import lru_cache
 import boto3
 import simplejson as json
 import decimal
+from queue import Queue
+import threading
 
 def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
@@ -29,9 +31,11 @@ KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 class RowProvider(object):
     def __init__(self):
         super().__init__()
-        self.scanned_count = 0
-        self.local_count = 0
-        self.page_count = 0
+
+    # "abstract" properties expected to be implemented:
+    # scanned_count
+    # local_count
+    # page_count
 
     def get_rows(self):
         raise NotImplementedError()
@@ -39,6 +43,9 @@ class RowProvider(object):
 class PaginatedRowProvider(RowProvider):
     def __init__(self):
         super().__init__()
+        self.scanned_count = 0
+        self.local_count = 0
+        self.page_count = 0
 
     def get_rows(self):
         last_evaluated_key = None
@@ -72,21 +79,99 @@ class QueryRowProvider(PaginatedRowProvider):
         return self.table.query(**my_query_params)
 
 class ScanRowProvider(PaginatedRowProvider):
-    def __init__(self, table):
+    def __init__(self, table, scan_params):
         super().__init__()
         self.table = table
+        self.scan_params = scan_params
 
     def get_page(self, last_evaluated_key):
         my_scan_params = {}
+        my_scan_params.update(self.scan_params)
         if last_evaluated_key is not None:
             my_scan_params['ExclusiveStartKey'] = last_evaluated_key
-        else:
-            log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
         log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
         return self.table.scan(**my_scan_params)
 
-#class MultiRowProvider(object):
-#    pass
+class ParallelScanIterator(object):
+    def __init__(self, queue, workers, threads):
+        super().__init__()
+        self.queue = queue
+        self.workers = workers
+        self.threads = threads
+
+    def __del__(self):
+        for thread in self.threads:
+            thread.kill_signal = True
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()
+
+    def next(self):
+        while True:
+            item = self.queue.get()
+            if item is not_found_sentinel:
+                self.workers -= 1
+                if self.workers == 0:
+                    raise StopIteration()
+            else:
+                return item
+        
+class ParallelScanThread(threading.Thread):
+    def __init__(self, row_provider, queue):
+        super().__init__()
+        self.row_provider = row_provider
+        self.queue = queue
+        self.kill_signal = False
+
+    def run(self):
+        for row in self.row_provider.get_rows():
+            while True:
+                if self.kill_signal:
+                    # This will only happen if our iterator has been deleted, in which case putting
+                    # the not_found_sentinel into the queue doesn't matter
+                    return
+                try:
+                    self.queue.put(row, timeout=1)
+                    break
+                except queue.Full:
+                    # we'll try again; but also check for kill_signal
+                    pass
+        self.queue.put(not_found_sentinel)
+
+
+class ParallelScanRowProvider(RowProvider):
+    def __init__(self, table, parallel_scan_count):
+        super().__init__()
+        self.table = table
+        self.total_segments = parallel_scan_count
+        self.scan_providers = [
+            ScanRowProvider(table, { "Segment": i, "TotalSegments": self.total_segments })
+            for i in range(self.total_segments)
+        ]
+
+    @property
+    def scanned_count(self):
+        return sum([s.scanned_count for s in self.scan_providers])
+
+    @property
+    def local_count(self):
+        return sum([s.local_count for s in self.scan_providers])
+
+    @property
+    def page_count(self):
+        return sum([s.page_count for s in self.scan_providers])
+
+    def get_rows(self):
+        log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
+        queue = Queue(self.total_segments * 10)
+        threads = [ParallelScanThread(s, queue) for s in self.scan_providers]
+        for t in threads:
+            t.start()
+        return ParallelScanIterator(queue, len(self.scan_providers), threads)
+
 
 class DynamoFdw(ForeignDataWrapper):
     """
@@ -115,6 +200,7 @@ class DynamoFdw(ForeignDataWrapper):
         # restricts repr: ['table_a', 'table_b']
 
         aws_region = options['aws_region']
+        parallel_scan_count = options.get('parallel_scan_count', '8')
         dynamodb = get_dynamodb(aws_region)
         for table in dynamodb.tables.all():
             if restriction_type == 'limit':
@@ -144,6 +230,7 @@ class DynamoFdw(ForeignDataWrapper):
                 options={
                     'aws_region': aws_region,
                     'table_name': table.name,
+                    'parallel_scan_count': parallel_scan_count,
                 }
             )
 
@@ -151,6 +238,7 @@ class DynamoFdw(ForeignDataWrapper):
         super(DynamoFdw, self).__init__(options, columns)
         self.aws_region = options['aws_region']
         self.table_name = options['table_name']
+        self.parallel_scan_count = int(options.get('parallel_scan_count', '8'))
         self.columns = columns
         self.pending_batch_write = []
         if self.partition_key is not_found_sentinel:
@@ -280,9 +368,12 @@ class DynamoFdw(ForeignDataWrapper):
         table = get_table(self.aws_region, self.table_name)
 
         query_params = None
+        # Theoretically in the future we could do a multiple-query row provider.  eg.
+        # where partition_key in [a, b, c] could have three queries performed in parallel.
+        # This currently only does one, and any more complex query gets converted into a scan.
         partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
         if partition_key_value is not_found_sentinel:
-            return ScanRowProvider(table)
+            return ParallelScanRowProvider(table, self.parallel_scan_count)
 
         log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
         query_params = {
@@ -324,49 +415,6 @@ class DynamoFdw(ForeignDataWrapper):
                 "DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" %
                 (row_provider.page_count, row_provider.local_count, row_provider.scanned_count), INFO)
 
-
-        #last_evaluated_key = None
-        #try:
-        #    while True:
-        #        if query_params is not None:
-        #            my_query_params = {}
-        #            my_query_params.update(query_params)
-        #            if last_evaluated_key is not None:
-        #                my_query_params['ExclusiveStartKey'] = last_evaluated_key
-        #            log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
-        #            resp = table.query(**my_query_params)
-        #        else:
-        #            my_scan_params = {}
-        #            if last_evaluated_key is not None:
-        #                my_scan_params['ExclusiveStartKey'] = last_evaluated_key
-        #            else:
-        #                log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
-        #            log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
-        #            resp = table.scan(**my_scan_params)
-        #
-        #        scanned_count += resp['ScannedCount']
-        #        local_count += resp['Count']
-        #        page_count += 1
-        #
-        #        data_page = resp['Items']
-        #        for ddb_row in data_page:
-        #            pg_row = {}
-        #            pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
-        #            if self.sort_key is not not_found_sentinel:
-        #                pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
-        #            # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
-        #            pg_row['oid'] = json.dumps(pg_row)
-        #            pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
-        #            yield pg_row
-        #
-        #        last_evaluated_key = resp.get('LastEvaluatedKey')
-        #        log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
-        #        if last_evaluated_key is None:
-        #            break
-        #finally:
-        #    # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
-        #    log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
-    
     def delete(self, oid):
         # called once for each row to be deleted, with the oid value
         # oid value is a json encoded '{"pg_partition_key": "pkey2", "pg_sort_key": "skey2"}'
