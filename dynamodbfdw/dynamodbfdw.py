@@ -37,7 +37,7 @@ class RowProvider(object):
     # local_count
     # page_count
 
-    def get_rows(self):
+    def get_rows(self, table):
         raise NotImplementedError()
 
 class PaginatedRowProvider(RowProvider):
@@ -47,10 +47,10 @@ class PaginatedRowProvider(RowProvider):
         self.local_count = 0
         self.page_count = 0
 
-    def get_rows(self):
+    def get_rows(self, table):
         last_evaluated_key = None
         while True:
-            resp = self.get_page(last_evaluated_key)
+            resp = self.get_page(table, last_evaluated_key)
         
             self.scanned_count += resp['ScannedCount']
             self.local_count += resp['Count']
@@ -65,32 +65,30 @@ class PaginatedRowProvider(RowProvider):
                 break
 
 class QueryRowProvider(PaginatedRowProvider):
-    def __init__(self, table, query_params):
+    def __init__(self, query_params):
         super().__init__()
-        self.table = table
         self.query_params = query_params
 
-    def get_page(self, last_evaluated_key):
+    def get_page(self, table, last_evaluated_key):
         my_query_params = {}
         my_query_params.update(self.query_params)
         if last_evaluated_key is not None:
             my_query_params['ExclusiveStartKey'] = last_evaluated_key
         log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
-        return self.table.query(**my_query_params)
+        return table.query(**my_query_params)
 
 class ScanRowProvider(PaginatedRowProvider):
-    def __init__(self, table, scan_params):
+    def __init__(self, scan_params):
         super().__init__()
-        self.table = table
         self.scan_params = scan_params
 
-    def get_page(self, last_evaluated_key):
+    def get_page(self, table, last_evaluated_key):
         my_scan_params = {}
         my_scan_params.update(self.scan_params)
         if last_evaluated_key is not None:
             my_scan_params['ExclusiveStartKey'] = last_evaluated_key
         log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
-        return self.table.scan(**my_scan_params)
+        return table.scan(**my_scan_params)
 
 class ParallelScanIterator(object):
     def __init__(self, queue, workers, threads):
@@ -120,14 +118,15 @@ class ParallelScanIterator(object):
                 return item
         
 class ParallelScanThread(threading.Thread):
-    def __init__(self, row_provider, queue):
+    def __init__(self, table, row_provider, queue):
         super().__init__()
         self.row_provider = row_provider
         self.queue = queue
+        self.table = table
         self.kill_signal = False
 
     def run(self):
-        for row in self.row_provider.get_rows():
+        for row in self.row_provider.get_rows(self.table):
             while True:
                 if self.kill_signal:
                     # This will only happen if our iterator has been deleted, in which case putting
@@ -141,14 +140,12 @@ class ParallelScanThread(threading.Thread):
                     pass
         self.queue.put(not_found_sentinel)
 
-
 class ParallelScanRowProvider(RowProvider):
-    def __init__(self, table, parallel_scan_count):
+    def __init__(self, parallel_scan_count):
         super().__init__()
-        self.table = table
         self.total_segments = parallel_scan_count
         self.scan_providers = [
-            ScanRowProvider(table, { "Segment": i, "TotalSegments": self.total_segments })
+            ScanRowProvider({ "Segment": i, "TotalSegments": self.total_segments })
             for i in range(self.total_segments)
         ]
 
@@ -164,10 +161,10 @@ class ParallelScanRowProvider(RowProvider):
     def page_count(self):
         return sum([s.page_count for s in self.scan_providers])
 
-    def get_rows(self):
+    def get_rows(self, table):
         log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
         queue = Queue(self.total_segments * 10)
-        threads = [ParallelScanThread(s, queue) for s in self.scan_providers]
+        threads = [ParallelScanThread(table, s, queue) for s in self.scan_providers]
         for t in threads:
             t.start()
         return ParallelScanIterator(queue, len(self.scan_providers), threads)
@@ -365,15 +362,13 @@ class DynamoFdw(ForeignDataWrapper):
         return not_found_sentinel
 
     def plan_query(self, quals):
-        table = get_table(self.aws_region, self.table_name)
-
         query_params = None
         # Theoretically in the future we could do a multiple-query row provider.  eg.
         # where partition_key in [a, b, c] could have three queries performed in parallel.
         # This currently only does one, and any more complex query gets converted into a scan.
         partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
         if partition_key_value is not_found_sentinel:
-            return ParallelScanRowProvider(table, self.parallel_scan_count)
+            return ParallelScanRowProvider(self.parallel_scan_count)
 
         log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
         query_params = {
@@ -391,7 +386,7 @@ class DynamoFdw(ForeignDataWrapper):
                 query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
 
         log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
-        return QueryRowProvider(table, query_params)
+        return QueryRowProvider(query_params)
 
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
@@ -399,8 +394,10 @@ class DynamoFdw(ForeignDataWrapper):
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
         row_provider = self.plan_query(quals)
+        table = get_table(self.aws_region, self.table_name)
+
         try:
-            for ddb_row in row_provider.get_rows():
+            for ddb_row in row_provider.get_rows(table):
                 pg_row = {}
                 pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
                 if self.sort_key is not not_found_sentinel:

@@ -6,3 +6,4 @@ dump.sql
 build/
 fire-up.sh
 test-pgpass
+__pycache__
