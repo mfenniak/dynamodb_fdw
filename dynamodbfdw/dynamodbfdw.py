@@ -6,6 +6,8 @@ from functools import lru_cache
 import boto3
 import simplejson as json
 import decimal
+from queue import Queue
+import threading
 
 def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
@@ -29,9 +31,11 @@ KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 class RowProvider(object):
     def __init__(self):
         super().__init__()
-        self.scanned_count = 0
-        self.local_count = 0
-        self.page_count = 0
+
+    # "abstract" properties expected to be implemented:
+    # scanned_count
+    # local_count
+    # page_count
 
     def get_rows(self):
         raise NotImplementedError()
@@ -39,6 +43,9 @@ class RowProvider(object):
 class PaginatedRowProvider(RowProvider):
     def __init__(self):
         super().__init__()
+        self.scanned_count = 0
+        self.local_count = 0
+        self.page_count = 0
 
     def get_rows(self):
         last_evaluated_key = None
@@ -72,12 +79,14 @@ class QueryRowProvider(PaginatedRowProvider):
         return self.table.query(**my_query_params)
 
 class ScanRowProvider(PaginatedRowProvider):
-    def __init__(self, table):
+    def __init__(self, table, scan_params):
         super().__init__()
         self.table = table
+        self.scan_params = scan_params
 
     def get_page(self, last_evaluated_key):
         my_scan_params = {}
+        my_scan_params.update(self.scan_params)
         if last_evaluated_key is not None:
             my_scan_params['ExclusiveStartKey'] = last_evaluated_key
         else:
@@ -85,8 +94,76 @@ class ScanRowProvider(PaginatedRowProvider):
         log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
         return self.table.scan(**my_scan_params)
 
+class ParallelScanIterator(object):
+    # FIXME: when ParallelScanIterator is dropped, we should stop all threads
+    def __init__(self, queue, workers):
+        super().__init__()
+        self.queue = queue
+        self.workers = workers
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()
+
+    def next(self):
+        while True:
+            item = self.queue.get()
+            if item is not_found_sentinel:
+                self.workers -= 1
+                if self.workers == 0:
+                    raise StopIteration()
+            else:
+                return item
+        
+class ParallelScanThread(threading.Thread):
+    def __init__(self, row_provider, queue):
+        super().__init__()
+        self.row_provider = row_provider
+        self.queue = queue
+
+    def run(self):
+        # FIXME: how to exit early if limit is reached; eg. when ParallelScanIterator is dropped
+        for row in self.row_provider.get_rows():
+            self.queue.put(row)
+        self.queue.put(not_found_sentinel)
+
+class ParallelScanRowProvider(RowProvider):
+    def __init__(self, table):
+        super().__init__()
+        self.table = table
+        # FIXME: make parallel scan count customizable
+        self.total_segments = 16
+        self.scan_providers = [
+            ScanRowProvider(table, { "Segment": i, "TotalSegments": self.total_segments })
+            for i in range(self.total_segments)
+        ]
+
+    @property
+    def scanned_count(self):
+        return sum([s.scanned_count for s in self.scan_providers])
+
+    @property
+    def local_count(self):
+        return sum([s.local_count for s in self.scan_providers])
+
+    @property
+    def page_count(self):
+        return sum([s.page_count for s in self.scan_providers])
+
+    def get_rows(self):
+        queue = Queue(self.total_segments * 10)
+        threads = [ParallelScanThread(s, queue) for s in self.scan_providers]
+        for t in threads:
+            t.start()
+        return ParallelScanIterator(queue, len(self.scan_providers))
+
 #class MultiRowProvider(object):
 #    pass
+# Segment
+# TotalSegments
+
 
 class DynamoFdw(ForeignDataWrapper):
     """
@@ -282,7 +359,7 @@ class DynamoFdw(ForeignDataWrapper):
         query_params = None
         partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
         if partition_key_value is not_found_sentinel:
-            return ScanRowProvider(table)
+            return ParallelScanRowProvider(table)
 
         log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
         query_params = {
