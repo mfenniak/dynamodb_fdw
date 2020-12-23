@@ -26,6 +26,68 @@ class MyJsonEncoder(json.JSONEncoder):
 not_found_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 
+class RowProvider(object):
+    def __init__(self):
+        super().__init__()
+        self.scanned_count = 0
+        self.local_count = 0
+        self.page_count = 0
+
+    def get_rows(self):
+        raise NotImplementedError()
+
+class PaginatedRowProvider(RowProvider):
+    def __init__(self):
+        super().__init__()
+
+    def get_rows(self):
+        last_evaluated_key = None
+        while True:
+            resp = self.get_page(last_evaluated_key)
+        
+            self.scanned_count += resp['ScannedCount']
+            self.local_count += resp['Count']
+            self.page_count += 1
+
+            data_page = resp['Items']
+            for ddb_row in data_page:
+                yield ddb_row
+            last_evaluated_key = resp.get('LastEvaluatedKey')
+            log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
+            if last_evaluated_key is None:
+                break
+
+class QueryRowProvider(PaginatedRowProvider):
+    def __init__(self, table, query_params):
+        super().__init__()
+        self.table = table
+        self.query_params = query_params
+
+    def get_page(self, last_evaluated_key):
+        my_query_params = {}
+        my_query_params.update(self.query_params)
+        if last_evaluated_key is not None:
+            my_query_params['ExclusiveStartKey'] = last_evaluated_key
+        log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
+        return self.table.query(**my_query_params)
+
+class ScanRowProvider(PaginatedRowProvider):
+    def __init__(self, table):
+        super().__init__()
+        self.table = table
+
+    def get_page(self, last_evaluated_key):
+        my_scan_params = {}
+        if last_evaluated_key is not None:
+            my_scan_params['ExclusiveStartKey'] = last_evaluated_key
+        else:
+            log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
+        log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
+        return self.table.scan(**my_scan_params)
+
+#class MultiRowProvider(object):
+#    pass
+
 class DynamoFdw(ForeignDataWrapper):
     """
     DynamoDB foreign data wrapper
@@ -214,77 +276,96 @@ class DynamoFdw(ForeignDataWrapper):
 
         return not_found_sentinel
 
+    def plan_query(self, quals):
+        table = get_table(self.aws_region, self.table_name)
+
+        query_params = None
+        partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
+        if partition_key_value is not_found_sentinel:
+            return ScanRowProvider(table)
+
+        log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
+        query_params = {
+            'KeyConditions': {}
+        }
+        query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
+            'AttributeValueList': [partition_key_value],
+            'ComparisonOperator': 'EQ',
+        }
+
+        if self.sort_key is not not_found_sentinel:
+            sort_key_cond = self.compute_sort_key_condition(quals)
+            log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
+            if sort_key_cond is not not_found_sentinel:
+                query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
+
+        log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
+        return QueryRowProvider(table, query_params)
+
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
-        table = get_table(self.aws_region, self.table_name)
-
-        query_params = None
-        partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
-        if partition_key_value is not not_found_sentinel:
-            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
-            query_params = {
-                'KeyConditions': {}
-            }
-            query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
-                'AttributeValueList': [partition_key_value],
-                'ComparisonOperator': 'EQ',
-            }
-
-            if self.sort_key is not not_found_sentinel:
-                sort_key_cond = self.compute_sort_key_condition(quals)
-                log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
-                if sort_key_cond is not not_found_sentinel:
-                    query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
-        log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
-
-        local_count = 0
-        scanned_count = 0
-        page_count = 0
-
-        last_evaluated_key = None
+        row_provider = self.plan_query(quals)
         try:
-            while True:
-                if query_params is not None:
-                    my_query_params = {}
-                    my_query_params.update(query_params)
-                    if last_evaluated_key is not None:
-                        my_query_params['ExclusiveStartKey'] = last_evaluated_key
-                    log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
-                    resp = table.query(**my_query_params)
-                else:
-                    my_scan_params = {}
-                    if last_evaluated_key is not None:
-                        my_scan_params['ExclusiveStartKey'] = last_evaluated_key
-                    else:
-                        log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
-                    log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
-                    resp = table.scan(**my_scan_params)
-
-                scanned_count += resp['ScannedCount']
-                local_count += resp['Count']
-                page_count += 1
-
-                data_page = resp['Items']
-                for ddb_row in data_page:
-                    pg_row = {}
-                    pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
-                    if self.sort_key is not not_found_sentinel:
-                        pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
-                    # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
-                    pg_row['oid'] = json.dumps(pg_row)
-                    pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
-                    yield pg_row
-
-                last_evaluated_key = resp.get('LastEvaluatedKey')
-                log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
-                if last_evaluated_key is None:
-                    break
+            for ddb_row in row_provider.get_rows():
+                pg_row = {}
+                pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
+                if self.sort_key is not not_found_sentinel:
+                    pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
+                # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
+                pg_row['oid'] = json.dumps(pg_row)
+                pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
+                yield pg_row
         finally:
             # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
-            log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
+            log_to_postgres(
+                "DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" %
+                (row_provider.page_count, row_provider.local_count, row_provider.scanned_count), INFO)
+
+
+        #last_evaluated_key = None
+        #try:
+        #    while True:
+        #        if query_params is not None:
+        #            my_query_params = {}
+        #            my_query_params.update(query_params)
+        #            if last_evaluated_key is not None:
+        #                my_query_params['ExclusiveStartKey'] = last_evaluated_key
+        #            log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
+        #            resp = table.query(**my_query_params)
+        #        else:
+        #            my_scan_params = {}
+        #            if last_evaluated_key is not None:
+        #                my_scan_params['ExclusiveStartKey'] = last_evaluated_key
+        #            else:
+        #                log_to_postgres("DynamoDB FDW SCAN operation; this can be costly and time-consuming; use partition_key if possible", WARNING)
+        #            log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
+        #            resp = table.scan(**my_scan_params)
+        #
+        #        scanned_count += resp['ScannedCount']
+        #        local_count += resp['Count']
+        #        page_count += 1
+        #
+        #        data_page = resp['Items']
+        #        for ddb_row in data_page:
+        #            pg_row = {}
+        #            pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
+        #            if self.sort_key is not not_found_sentinel:
+        #                pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
+        #            # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
+        #            pg_row['oid'] = json.dumps(pg_row)
+        #            pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
+        #            yield pg_row
+        #
+        #        last_evaluated_key = resp.get('LastEvaluatedKey')
+        #        log_to_postgres("LastEvaluatedKey from query/scan: %r" % (last_evaluated_key,), DEBUG)
+        #        if last_evaluated_key is None:
+        #            break
+        #finally:
+        #    # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
+        #    log_to_postgres("DynamoDB FDW retrieved %s pages containing %s records; DynamoDB scanned %s records server-side" % (page_count, local_count, scanned_count), INFO)
     
     def delete(self, oid):
         # called once for each row to be deleted, with the oid value
