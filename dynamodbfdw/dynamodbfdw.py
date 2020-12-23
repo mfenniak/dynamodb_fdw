@@ -95,11 +95,15 @@ class ScanRowProvider(PaginatedRowProvider):
         return self.table.scan(**my_scan_params)
 
 class ParallelScanIterator(object):
-    # FIXME: when ParallelScanIterator is dropped, we should stop all threads
-    def __init__(self, queue, workers):
+    def __init__(self, queue, workers, threads):
         super().__init__()
         self.queue = queue
         self.workers = workers
+        self.threads = threads
+
+    def __del__(self):
+        for thread in self.threads:
+            thread.kill_signal = True
 
     def __iter__(self):
         return self
@@ -122,12 +126,23 @@ class ParallelScanThread(threading.Thread):
         super().__init__()
         self.row_provider = row_provider
         self.queue = queue
+        self.kill_signal = False
 
     def run(self):
-        # FIXME: how to exit early if limit is reached; eg. when ParallelScanIterator is dropped
         for row in self.row_provider.get_rows():
-            self.queue.put(row)
+            while True:
+                if self.kill_signal:
+                    # This will only happen if our iterator has been deleted, in which case putting
+                    # the not_found_sentinel into the queue doesn't matter
+                    return
+                try:
+                    self.queue.put(row, timeout=1)
+                    break
+                except queue.Full:
+                    # we'll try again; but also check for kill_signal
+                    pass
         self.queue.put(not_found_sentinel)
+
 
 class ParallelScanRowProvider(RowProvider):
     def __init__(self, table):
@@ -157,12 +172,7 @@ class ParallelScanRowProvider(RowProvider):
         threads = [ParallelScanThread(s, queue) for s in self.scan_providers]
         for t in threads:
             t.start()
-        return ParallelScanIterator(queue, len(self.scan_providers))
-
-#class MultiRowProvider(object):
-#    pass
-# Segment
-# TotalSegments
+        return ParallelScanIterator(queue, len(self.scan_providers), threads)
 
 
 class DynamoFdw(ForeignDataWrapper):
