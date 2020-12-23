@@ -48,6 +48,12 @@ IMPORT FOREIGN SCHEMA dynamodb
     OPTIONS ( aws_region 'us-west-2' );
 ```
 
+Options supported in schema import:
+- `aws_region`
+  - Name of the AWS region which will be scanned for DynamoDB tables.
+- `parallel_scan_count`
+  - (optional) Imported tables have this `parallel_scan_count` value set on them; see the table-level documentation for description.  Defaults to 8 if not specified.
+
 DynamoDB is a schema-less system except for the partition & sort keys.  dynamodb_fdw represents that accurately by providing most of the data in a `document` json field.  Your table schema, either imported, or manually created if you like, would look like this:
 
 ```
@@ -61,6 +67,14 @@ CREATE FOREIGN TABLE fdwtest2 (
     table_name 'fdwtest2'
 )
 ```
+
+Options supported on the table are:
+- `aws_region`
+  - Name of the AWS region which will be scanned for DynamoDB tables.
+- `table_name`
+  - Name of the DynamoDB table.
+- `parallel_scan_count`
+  - (optional) When DynamoDB scan operations need to be performed, they are split into multiple segments that are scanned in parallel to improve performance.  This is the number of parallel segmented scans used.  Defaults to 8 if not specified.
 
 The fields in this example table are:
 - `oid`
