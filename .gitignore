@@ -7,3 +7,4 @@ build/
 fire-up.sh
 test-pgpass
 __pycache__
+venv

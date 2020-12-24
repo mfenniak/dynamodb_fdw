@@ -1,0 +1,16 @@
+attrs==20.3.0
+boto3==1.16.43
+botocore==1.19.43
+iniconfig==1.1.1
+jmespath==0.10.0
+packaging==20.8
+pluggy==0.13.1
+psycopg2==2.8.6
+py==1.10.0
+pyparsing==2.4.7
+pytest==6.2.1
+python-dateutil==2.8.1
+s3transfer==0.3.3
+six==1.15.0
+toml==0.10.2
+urllib3==1.26.2
