@@ -189,6 +189,14 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 - Most filtering is done by PostgreSQL, excluding the partition key query.  More filtering operations could be sent to DynamoDB to reduce the amount of data being retrieved.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
 
+## Development
+
+dynamodb_fdw has two sets of tests; unit tests that run without a PostgreSQL database or an AWS account, and integration tests that require both.
+
+To run the unit tests, set up a virtualenv, pip install the requirements, and then run `pytest tests/unit`.
+
+To run the integration tests, set up a virtualenv, pip install the requirements, and then run `pytest tests/integration`.  An active PostgreSQL server on localhost port 5432, dbname postgres, user postgres, password password, and the dynamodb_fdw system installed into it, is all required.  Active AWS credentials are required.  DynamoDB tables will be created in the us-east-1 region.
+
 ## Thanks
 
 This is a fork of Fabio Rueda's original DynamoDB FDW implementation, https://github.com/avances123/dynamodb_fdw.  Not much remains of that original code base, but I thank Fabio for providing a great starting point!
