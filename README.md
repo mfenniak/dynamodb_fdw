@@ -193,7 +193,7 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 
 dynamodb_fdw has two sets of tests; unit tests that run without a PostgreSQL database or an AWS account, and integration tests that require both.
 
-To run the unit tests, set up a virtualenv, pip install the requirements, and then run `pytest tests/unit`.
+To run the unit tests, set up a virtualenv, pip install the requirements, and then run `pytest dynamodbfdw`.
 
 To run the integration tests, set up a virtualenv, pip install the requirements, and then run `pytest tests/integration`.  An active PostgreSQL server on localhost port 5432, dbname postgres, user postgres, password password, and the dynamodb_fdw system installed into it, is all required.  Active AWS credentials are required.  DynamoDB tables will be created in the us-east-1 region.
 
