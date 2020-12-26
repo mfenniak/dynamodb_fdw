@@ -61,6 +61,7 @@ CREATE FOREIGN TABLE fdwtest2 (
     oid TEXT,
     partition_key TEXT OPTIONS ( partition_key 'id' ),
     sort_key TEXT OPTIONS ( sort_key 'skey' ),
+    lsi_sort_key TEXT OPTIONS ( lsi_name 'lsi1', lsi_key 'skey2' ),
     document JSON OPTIONS ( ddb_document 'true' )
 ) SERVER multicorn_dynamo OPTIONS (
     aws_region 'us-west-2',
@@ -83,10 +84,18 @@ The fields in this example table are:
   - The partition key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string partition keys are supported currently.  The option `partition_key` must be set to the name of the partition key on the DynamoDB table.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.  One field marked with `partition_key` option must be present.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
   - One specific PostgreSQL query operation on the partition key will be translated into an optimized DynamoDB query; an exact match equality check on the partition key.
 - `sort_key`
-  - The sort key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string sort keys are supported currently.  The option `sort_key` must be set to the name of the sort key on the DynamoDB table.  If the DynamoDB table has no sort key, this field can be omitted.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
+  - The sort key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string sort keys are supported currently.  The option `sort_key` must be set to the name of the sort key on the DynamoDB table.  If the DynamoDB table has no sort key, this field can be omitted.
+  - Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
   - Specific PostgreSQL query operations on the sort key will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
 - `document`
   - JSON-structured version of the entire DynamoDB record.  Any name can be used for the PostgreSQL column.  One field marked with the option `ddb_document` must be present.
+- `lsi_name` & `lsi_key`
+  - Indicates that this column is the sort key of a local secondary index on the DynamoDB Table.
+  - `lsi_name` option is the name of the local secondary index.
+  - `lsi_key` is the attribute name indexed on the table.
+  - Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
+  - Specific PostgreSQL query operations on the LSI field will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
+  - Only recommended for use on local secondary indexes with projection type "ALL"; otherwise queries that use the local secondary index will return records than queries that do not use the index, which can be very confusing.  Schema import will ignore indexes that don't match this criteria.
 
 So, what can you do now?  Let's start simple, by querying a DynamoDB table:
 
