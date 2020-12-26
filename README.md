@@ -62,6 +62,8 @@ CREATE FOREIGN TABLE fdwtest2 (
     partition_key TEXT OPTIONS ( partition_key 'id' ),
     sort_key TEXT OPTIONS ( sort_key 'skey' ),
     lsi_sort_key TEXT OPTIONS ( lsi_name 'lsi1', lsi_key 'skey2' ),
+    gsi_partition_key TEXT OPTIONS ( gsi_name 'gsi1', gsi_partition_key 'pkey2' ),
+    gsi_sort_key TEXT OPTIONS ( gsi_name 'gsi1', gsi_sort_key 'skey2' ),
     document JSON OPTIONS ( ddb_document 'true' )
 ) SERVER multicorn_dynamo OPTIONS (
     aws_region 'us-west-2',
@@ -95,13 +97,21 @@ The fields in this example table are:
     - and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).
 - `document`
   - JSON-structured version of the entire DynamoDB record.  Any name can be used for the PostgreSQL column.  One field marked with the option `ddb_document` must be present.
-- `lsi_name` & `lsi_key`
-  - Indicates that this column is the sort key of a local secondary index on the DynamoDB Table.
+- `lsi_sort_key`
+  - A secondary sort-index defined by a local secondary index on on the DynamoDB Table.
   - `lsi_name` option is the name of the local secondary index.
-  - `lsi_key` is the attribute name indexed on the table.
+  - `lsi_key` option is the attribute name indexed on the DynamoDB table.
   - Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
   - Specific PostgreSQL query operations on the LSI field will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
   - Only recommended for use on local secondary indexes with projection type "ALL"; otherwise queries that use the local secondary index will return records than queries that do not use the index, which can be very confusing.  Schema import will ignore indexes that don't match this criteria.
+- `gsi_partition_key` and `gsi_sort_key`
+  - A secondary partition key and a sort key defined by a global secondary index on the DynamoDB table.
+  - `gsi_name` option is the name of the global secondary index.
+  - `gsi_partition_key` option is the attribute name indexed as the partition key on the DynamoDB global secondary index.
+  - `gsi_sort_key` option is the attribute name indexed as the sort key on the DynamoDB global secondary index; can be omitted if it is a partition-key only index.
+  - Foreign schema import will set the PostgreSQL field names to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
+  - Specific PostgreSQL query operations on the GSI partition key & sort keys will be translated into optimized DynamoDB query.  The rules followed are the same as those for the `partition_key` and `sort_key` field.
+  - Only recommended for use on global secondary indexes with projection type "ALL"; otherwise queries that use the local secondary index will return records than queries that do not use the index, which can be very confusing.  Schema import will ignore indexes that don't match this criteria.
 
 So, what can you do now?  Let's start simple, by querying a DynamoDB table:
 
@@ -240,7 +250,6 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
-- Querying with global secondary indexes is not yet supported.
 - Query conditions against sort keys and local secondary indexes need to be very precise to be included in the DynamoDB query.  You have to use a supported sort key filter, and **only** a supported sort key search.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring multiple sort key conditions.
 - When multiple Query operations are used (eg. `partition_key IN ('a', 'b', 'c')`), then all queries are run sequentially.  Adding parallelism here could help with performance, but we'd to limit the parallelism to a maximum count.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
