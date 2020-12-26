@@ -1,13 +1,12 @@
+from collections import namedtuple
+from functools import lru_cache
+from queue import Queue, Full
+import threading
 from multicorn import ForeignDataWrapper, TableDefinition, ColumnDefinition
 from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
-from collections import namedtuple
-from functools import lru_cache
 import boto3
 import simplejson as json
-import decimal
-from queue import Queue
-import threading
 
 def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
@@ -29,9 +28,6 @@ not_found_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 
 class RowProvider(object):
-    def __init__(self):
-        super().__init__()
-
     # "abstract" properties expected to be implemented:
     # scanned_count
     # local_count
@@ -55,7 +51,7 @@ class PaginatedRowProvider(RowProvider):
         last_evaluated_key = None
         while True:
             resp = self.get_page(table, last_evaluated_key)
-        
+
             self.scanned_count += resp['ScannedCount']
             self.local_count += resp['Count']
             self.page_count += 1
@@ -72,6 +68,12 @@ class PaginatedRowProvider(RowProvider):
         yield "DynamoDB: pagination provider"
         for line in self.explain_page(verbose, aws_region, table_name):
             yield "  %s" % line
+
+    def get_page(self, table, last_evaluated_key):
+        raise NotImplementedError()
+
+    def explain_page(self, verbose, aws_region, table_name):
+        raise NotImplementedError()
 
 
 class QueryRowProvider(PaginatedRowProvider):
@@ -157,7 +159,7 @@ class ParallelScanThread(threading.Thread):
                 try:
                     self.queue.put(row, timeout=1)
                     break
-                except queue.Full:
+                except Full:
                     # we'll try again; but also check for kill_signal
                     pass
         self.queue.put(not_found_sentinel)
@@ -278,7 +280,7 @@ class DynamoFdw(ForeignDataWrapper):
     @property
     @lru_cache()
     def partition_key(self):
-        for cname, column in self.columns.items():
+        for column in self.columns.values():
             pkey = column.options.get('partition_key', None)
             if pkey is not None:
                 return KeyField(pg_field_name=column.column_name, ddb_field_name=pkey)
@@ -287,7 +289,7 @@ class DynamoFdw(ForeignDataWrapper):
     @property
     @lru_cache()
     def sort_key(self):
-        for cname, column in self.columns.items():
+        for column in self.columns.values():
             skey = column.options.get('sort_key', None)
             if skey is not None:
                 return KeyField(pg_field_name=column.column_name, ddb_field_name=skey)
@@ -296,7 +298,7 @@ class DynamoFdw(ForeignDataWrapper):
     @property
     @lru_cache()
     def document_field(self):
-        for cname, column in self.columns.items():
+        for column in self.columns.values():
             ddb_document = column.options.get('ddb_document', None)
             if ddb_document is not None:
                 return KeyField(pg_field_name=column.column_name, ddb_field_name=None)
@@ -477,7 +479,6 @@ class DynamoFdw(ForeignDataWrapper):
         # WARNING:  update oldvalues: 'idkey1', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"string_column": "This is a string column", "id": "idkey1"}'}
         log_to_postgres("update oldvalues: %r, newvalues: %r" % (oldvalues, newvalues), DEBUG)
         log_to_postgres("UPDATE operation is not currently supported on DynamoDB FDW tables", ERROR)
-        pass
 
     def begin(self, serializable):
         # create an empty batch write buffer
