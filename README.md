@@ -82,11 +82,17 @@ The fields in this example table are:
   - Internal composite primary key of `partition_key`, and `sort_key`, used to support write operations.  It can be ignored; don't query it, and don't bother providing it when INSERTing into a table.
 - `partition_key`
   - The partition key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string partition keys are supported currently.  The option `partition_key` must be set to the name of the partition key on the DynamoDB table.  It is highly recommended that when querying `dynamodb`, you provide an exact `partition_key` query condition.  One field marked with `partition_key` option must be present.  Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
-  - One specific PostgreSQL query operation on the partition key will be translated into an optimized DynamoDB query; an exact match equality check on the partition key.
+  - A few query operations on the partition key will be translated into optimized DynamoDB queries.
+    - An exact match (eg. `partition_key = 'abc'`) will be turned into a DynamoDB query.
+    - Multiple exact matches (eg. `partition_key IN ('abc', 'def', 'hji')`) will be turned into multiple DynamoDB queries that are concatenated together.
 - `sort_key`
   - The sort key of the DynamoDB table.  Any name can be used for the PostgreSQL column.  Only string sort keys are supported currently.  The option `sort_key` must be set to the name of the sort key on the DynamoDB table.  If the DynamoDB table has no sort key, this field can be omitted.
   - Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
-  - Specific PostgreSQL query operations on the sort key will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
+  - Specific PostgreSQL query operations on the sort key will be translated into optimized DynamoDB queries.  All other filters will result in records being downloaded and filtered in PostgreSQL.  If multiple filters are performed, none will be translated into DynamoDB queries.  Supported operations are:
+    - single condition equality checks,
+    - range checks (>, <, >=, <=),
+    - between checks,
+    - and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).
 - `document`
   - JSON-structured version of the entire DynamoDB record.  Any name can be used for the PostgreSQL column.  One field marked with the option `ddb_document` must be present.
 - `lsi_name` & `lsi_key`
@@ -234,10 +240,10 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
-- Partition & sort key support is exactly one-to-one mapped with what is supported by DynamoDB.  However, dynamodb_fdw could break down the conditions and perform multiple queries that are joined together... for example, (partition_key = 'a' or partition_key = 'b') would result in a full table scan now, but it could result in two query operations instead.
-- While local secondary indexes are supported, global secondary indexes are not yet, and could be added.
-- Query conditions against sort keys and local secondary indexes need to be very precise... eg. you have to use a supported sort key search, and only a supported sort key search, in order to trigger the optimized query logic.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring sort key conditions.
+- Querying with global secondary indexes is not yet supported.
+- Query conditions against sort keys and local secondary indexes need to be very precise to be included in the DynamoDB query.  You have to use a supported sort key filter, and **only** a supported sort key search.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring multiple sort key conditions.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
+- It might be nice to map arbitrary DynamoDB attributes into the table for easy access.  However, DynamoDB attributes can change types arbitrarily on different records.  Ideally we'd support the PostgreSQL column being a `json` type, **or**, the PostgreSQL column being a specific type and throwing errors when objects don't match the expected values.
 
 ## Thanks
 

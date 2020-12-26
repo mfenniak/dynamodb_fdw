@@ -2,7 +2,7 @@ from collections import namedtuple
 from functools import lru_cache
 from queue import Queue, Full
 import threading
-from multicorn import ForeignDataWrapper, TableDefinition, ColumnDefinition
+from multicorn import ForeignDataWrapper, TableDefinition, ColumnDefinition, ANY
 from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
 import boto3
@@ -112,6 +112,55 @@ class ScanRowProvider(PaginatedRowProvider):
 
     def explain_page(self, verbose, aws_region, table_name):
         yield "DynamoDB: Scan table %s from %s" % (table_name, aws_region)
+
+
+class MultiQueryRowProvider(RowProvider):
+    def __init__(self, partition_key, multi_query_values, addt_query_params):
+        super().__init__()
+        self.query_providers = [
+            self.make_query_provider(partition_key, qv, addt_query_params)
+            for qv in multi_query_values
+        ]
+
+    def make_query_provider(self, partition_key, query_value, addt_query_params):
+        query_params = {}
+        query_params.update(addt_query_params)
+
+        # We're going to start mutating KeyConditions; to avoid mutating the same dict
+        # stored in addt_query_params multiple times, we've gotta copy it
+        kc = {}
+        kc.update(query_params.get('KeyConditions', {}))
+        query_params['KeyConditions'] = kc
+
+        query_params['KeyConditions'][partition_key.ddb_field_name] = {
+            'AttributeValueList': [query_value],
+            'ComparisonOperator': 'EQ',
+        }
+        return QueryRowProvider(query_params)
+
+    @property
+    def scanned_count(self):
+        return sum([s.scanned_count for s in self.query_providers])
+
+    @property
+    def local_count(self):
+        return sum([s.local_count for s in self.query_providers])
+
+    @property
+    def page_count(self):
+        return sum([s.page_count for s in self.query_providers])
+
+    def get_rows(self, table):
+        for qp in self.query_providers:
+            for row in qp.get_rows(table):
+                yield row
+
+    def explain(self, verbose, aws_region, table_name):
+        yield "DynamoDB: Consolidate %s Query operations" % (len(self.query_providers),)
+        for counter, qp in enumerate(self.query_providers):
+            yield "  Query %s:" % (counter)
+            for line in qp.explain(verbose, aws_region, table_name):
+                yield "    %s" % line
 
 
 class ParallelScanIterator(object):
@@ -434,22 +483,35 @@ class DynamoFdw(ForeignDataWrapper):
         return not_found_sentinel
 
     def plan_query(self, quals):
-        query_params = None
-        # Theoretically in the future we could do a multiple-query row provider.  eg.
-        # where partition_key in [a, b, c] could have three queries performed in parallel.
-        # This currently only does one, and any more complex query gets converted into a scan.
-        partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
-        if partition_key_value is not_found_sentinel:
-            return ParallelScanRowProvider(self.parallel_scan_count)
+        # Search for any multi-partition-key qualifiers; eg. partition_key IN ('1, '2')
+        # Those will be specialized to a multi-Query operation.
+        multi_query = None
+        for qual in quals:
+            if qual.field_name == self.partition_key.pg_field_name and qual.list_any_or_all is ANY and qual.operator[0] == '=':
+                multi_query = qual.value
+                break
 
-        log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
-        query_params = {
-            'KeyConditions': {}
-        }
-        query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
-            'AttributeValueList': [partition_key_value],
-            'ComparisonOperator': 'EQ',
-        }
+        if multi_query is not None:
+            # init query_params so that we can put sort-key or LSI info into it; but it won't
+            # contain the multi_query data
+            query_params = {
+                'KeyConditions': {}
+            }
+            log_to_postgres("partition key is a multi-query for: %r" % (multi_query,), DEBUG)
+        else:
+            partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
+            if partition_key_value is not_found_sentinel:
+                # No partition key filtering was found in a supported manner, so... scan that.
+                return ParallelScanRowProvider(self.parallel_scan_count)
+
+            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
+            query_params = {
+                'KeyConditions': {}
+            }
+            query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
+                'AttributeValueList': [partition_key_value],
+                'ComparisonOperator': 'EQ',
+            }
 
         sort_key_being_queried = False
         if self.sort_key is not not_found_sentinel:
@@ -468,7 +530,10 @@ class DynamoFdw(ForeignDataWrapper):
                     break # stop iterating LSIs, we can only use one
 
         log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
-        return QueryRowProvider(query_params)
+        if multi_query is not None:
+            return MultiQueryRowProvider(self.partition_key, multi_query, query_params)
+        else:
+            return QueryRowProvider(query_params)
 
     def explain(self, quals, columns, sortkeys=None, verbose=False):
         row_provider = self.plan_query(quals)
