@@ -27,6 +27,7 @@ class MyJsonEncoder(json.JSONEncoder):
 not_found_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 LocalSecondaryIndex = namedtuple('LocalSecondaryIndex', ['pg_field_name', 'ddb_lsi_name', 'ddb_field_name'])
+GlobalSecondaryIndex = namedtuple('GlobalSecondaryIndex', ['partition_key', 'sort_key', 'ddb_gsi_name'])
 
 class RowProvider(object):
     # "abstract" properties expected to be implemented:
@@ -323,6 +324,41 @@ class DynamoFdw(ForeignDataWrapper):
                                     }
                                 )
                             )
+            global_secondary_indexes = table.global_secondary_indexes
+            if global_secondary_indexes is not None:
+                for gsi in table.global_secondary_indexes:
+                    if gsi.get('Projection') != {'ProjectionType': 'ALL'}:
+                        # Technically we can read from an GSI that doesn't project all the attributes, but the
+                        # record fields in PostgreSQL will randomly have different values depending on whether
+                        # we select those GSIs to query.  This will result in really inconsistent looking data...
+                        # Probably the only way to get around that is to create separate "tables" for each GSI
+                        # and only query them explicitly.  Not supported (yet?)... so we'll just skip any GSI
+                        # that isn't an ALL projection.
+                        continue
+                    ddb_gsi_name = gsi['IndexName']
+                    for key in gsi['KeySchema']:
+                        if key['KeyType'] == 'HASH':
+                            columns.append(
+                                ColumnDefinition(
+                                    key['AttributeName'],
+                                    type_name='TEXT',
+                                    options={
+                                        'gsi_name': ddb_gsi_name,
+                                        'gsi_partition_key': key['AttributeName']
+                                    }
+                                )
+                            )
+                        elif key['KeyType'] == 'RANGE':
+                            columns.append(
+                                ColumnDefinition(
+                                    key['AttributeName'],
+                                    type_name='TEXT',
+                                    options={
+                                        'gsi_name': ddb_gsi_name,
+                                        'gsi_sort_key': key['AttributeName']
+                                    }
+                                )
+                            )
             columns.append(
                 ColumnDefinition('document', type_name='JSON', options={'ddb_document': 'true'})
             )
@@ -385,6 +421,37 @@ class DynamoFdw(ForeignDataWrapper):
             elif lsi_name is not None or lsi_key is not None:
                 log_to_postgres("DynamoDB FDW column must have both lsi_name and lsi_key", ERROR)
         return lsis
+
+    @property
+    @lru_cache()
+    def global_secondary_indexes(self):
+        # temp dict gsi_name to gsi object
+        gsi_dict = {}
+
+        # first find all the distinct gsi_name's
+        gsi_names = set()
+        for column in self.columns.values():
+            gsi_name = column.options.get('gsi_name', not_found_sentinel)
+            if gsi_name is not not_found_sentinel:
+                gsi_names.add(gsi_name)
+
+        for gsi_name in gsi_names:
+            for column in self.columns.values():
+                if gsi_name == column.options.get('gsi_name', not_found_sentinel):
+                    gsi = gsi_dict.get(gsi_name, GlobalSecondaryIndex(ddb_gsi_name=gsi_name, partition_key=None, sort_key=not_found_sentinel))
+                    gsi_partition_key = column.options.get('gsi_partition_key', not_found_sentinel)
+                    if gsi_partition_key is not not_found_sentinel:
+                        gsi = gsi._replace(partition_key=KeyField(pg_field_name=column.column_name, ddb_field_name=gsi_partition_key))
+                    gsi_sort_key = column.options.get('gsi_sort_key', not_found_sentinel)
+                    if gsi_sort_key is not not_found_sentinel:
+                        gsi = gsi._replace(sort_key=KeyField(pg_field_name=column.column_name, ddb_field_name=gsi_sort_key))
+                    gsi_dict[gsi_name] = gsi
+
+        for gsi in gsi_dict.values():
+            if gsi.partition_key is None:
+                log_to_postgres("DynamoDB GSI column %s had no partition_key" % (gsi.ddb_gsi_name,), ERROR)
+
+        return gsi_dict.values()
 
     @property
     @lru_cache()
@@ -482,12 +549,12 @@ class DynamoFdw(ForeignDataWrapper):
 
         return not_found_sentinel
 
-    def plan_query(self, quals):
+    def plan_by_key_pattern(self, quals, partition_key, sort_key, local_secondary_indexes, index_name=None):
         # Search for any multi-partition-key qualifiers; eg. partition_key IN ('1, '2')
         # Those will be specialized to a multi-Query operation.
         multi_query = None
         for qual in quals:
-            if qual.field_name == self.partition_key.pg_field_name and qual.list_any_or_all is ANY and qual.operator[0] == '=':
+            if qual.field_name == partition_key.pg_field_name and qual.list_any_or_all is ANY and qual.operator[0] == '=':
                 multi_query = qual.value
                 break
 
@@ -499,41 +566,58 @@ class DynamoFdw(ForeignDataWrapper):
             }
             log_to_postgres("partition key is a multi-query for: %r" % (multi_query,), DEBUG)
         else:
-            partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
+            partition_key_value = self.get_optional_exact_field(quals, partition_key.pg_field_name)
             if partition_key_value is not_found_sentinel:
-                # No partition key filtering was found in a supported manner, so... scan that.
-                return ParallelScanRowProvider(self.parallel_scan_count)
+                # Can't filter on this partition_key
+                return None
 
             log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
             query_params = {
                 'KeyConditions': {}
             }
-            query_params['KeyConditions'][self.partition_key.ddb_field_name] = {
+            query_params['KeyConditions'][partition_key.ddb_field_name] = {
                 'AttributeValueList': [partition_key_value],
                 'ComparisonOperator': 'EQ',
             }
 
+        if index_name is not None:
+            query_params['IndexName'] = index_name
+
         sort_key_being_queried = False
-        if self.sort_key is not not_found_sentinel:
-            sort_key_cond = self.compute_sort_key_condition(quals, self.sort_key)
+        if sort_key is not not_found_sentinel:
+            sort_key_cond = self.compute_sort_key_condition(quals, sort_key)
             log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
             if sort_key_cond is not not_found_sentinel:
-                query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
+                query_params['KeyConditions'][sort_key.ddb_field_name] = sort_key_cond
                 sort_key_being_queried = True
 
         if not sort_key_being_queried:
-            for lsi in self.local_secondary_indexes:
+            for lsi in local_secondary_indexes:
                 sort_key_cond = self.compute_sort_key_condition(quals, lsi)
                 if sort_key_cond is not not_found_sentinel:
+                    if index_name is not None:
+                        log_to_postgres("plan_by_key_pattern is conflicted on an LSI and a GSI?", ERROR)
                     query_params['KeyConditions'][lsi.ddb_field_name] = sort_key_cond
                     query_params['IndexName'] = lsi.ddb_lsi_name
                     break # stop iterating LSIs, we can only use one
 
         log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
         if multi_query is not None:
-            return MultiQueryRowProvider(self.partition_key, multi_query, query_params)
+            return MultiQueryRowProvider(partition_key, multi_query, query_params)
         else:
             return QueryRowProvider(query_params)
+
+    def plan_query(self, quals):
+        partition_key_plan = self.plan_by_key_pattern(quals, self.partition_key, self.sort_key, self.local_secondary_indexes)
+        if partition_key_plan is not None:
+            return partition_key_plan
+
+        for gsi in self.global_secondary_indexes:
+            gsi_plan = self.plan_by_key_pattern(quals, gsi.partition_key, gsi.sort_key, [], gsi.ddb_gsi_name)
+            if gsi_plan is not None:
+                return gsi_plan
+
+        return ParallelScanRowProvider(self.parallel_scan_count)
 
     def explain(self, quals, columns, sortkeys=None, verbose=False):
         row_provider = self.plan_query(quals)
@@ -555,9 +639,13 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
                 # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
                 pg_row['oid'] = json.dumps(pg_row)
-                # populate any local-secondary-index columns for PG-based filtering and consistency/display
+                # populate any secondary-index columns for PG-based filtering and consistency/display
                 for lsi in self.local_secondary_indexes:
                     pg_row[lsi.pg_field_name] = ddb_row.get(lsi.ddb_field_name)
+                for gsi in self.global_secondary_indexes:
+                    pg_row[gsi.partition_key.pg_field_name] = ddb_row.get(gsi.partition_key.ddb_field_name)
+                    if gsi.sort_key is not not_found_sentinel:
+                        pg_row[gsi.sort_key.pg_field_name] = ddb_row.get(gsi.sort_key.ddb_field_name)
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
                 yield pg_row
         finally:
@@ -592,6 +680,14 @@ class DynamoFdw(ForeignDataWrapper):
             v = value.get(lsi.pg_field_name, not_found_sentinel)
             if v is not not_found_sentinel:
                 put_item[lsi.ddb_field_name] = v
+        for gsi in self.global_secondary_indexes:
+            gsi_pkey_value = value.get(gsi.partition_key.pg_field_name, not_found_sentinel)
+            if gsi_pkey_value is not not_found_sentinel:
+                put_item[gsi.partition_key.ddb_field_name] = gsi_pkey_value
+            if gsi.sort_key is not not_found_sentinel:
+                gsi_skey_value = value.get(gsi.sort_key.pg_field_name, not_found_sentinel)
+                if gsi_skey_value is not not_found_sentinel:
+                    put_item[gsi.sort_key.ddb_field_name] = gsi_skey_value
         self.pending_batch_write.append({
             'PutItem': put_item
         })
