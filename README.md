@@ -245,6 +245,7 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 - When multiple Query operations are used (eg. `partition_key IN ('a', 'b', 'c')`), then all queries are run sequentially.  Adding parallelism here could help with performance, but we'd to limit the parallelism to a maximum count.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
 - It might be nice to map arbitrary DynamoDB attributes into the table for easy access.  However, DynamoDB attributes can change types arbitrarily on different records.  Ideally we'd support the PostgreSQL column being a `json` type, **or**, the PostgreSQL column being a specific type and throwing errors when objects don't match the expected values.  Unfortunately we couldn't to any of this during a schema import because it would be pretty application-opinionated, so it's likely not a feature that would be used much.
+- In DynamoDB, there are no restrictions on attributes being re-used in global & local secondary indexes.  However dynamodb_fdw hasn't been tested in any configuration like this; it currently assumes the partition & sort keys of secondary indexes don't overlap with each other (except the partition key of a local secondary index).
 
 ## Thanks
 
