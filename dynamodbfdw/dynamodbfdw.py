@@ -26,6 +26,7 @@ class MyJsonEncoder(json.JSONEncoder):
 
 not_found_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
+LocalSecondaryIndex = namedtuple('LocalSecondaryIndex', ['pg_field_name', 'ddb_lsi_name', 'ddb_field_name'])
 
 class RowProvider(object):
     # "abstract" properties expected to be implemented:
@@ -249,6 +250,30 @@ class DynamoFdw(ForeignDataWrapper):
                     columns.append(
                         ColumnDefinition(key['AttributeName'], type_name='TEXT', options={'sort_key': key['AttributeName']})
                     )
+            local_secondary_indexes = table.local_secondary_indexes
+            if local_secondary_indexes is not None:
+                for lsi in table.local_secondary_indexes:
+                    if lsi.get('Projection') != {'ProjectionType': 'ALL'}:
+                        # Technically we can read from an LSI that doesn't project all the attributes, but the
+                        # record fields in PostgreSQL will randomly have different values depending on whether
+                        # we select those LSIs to query.  This will result in really inconsistent looking data...
+                        # Probably the only way to get around that is to create separate "tables" for each LSI
+                        # and only query them explicitly.  Not supported (yet?)... so we'll just skip any LSI
+                        # that isn't an ALL projection.
+                        continue
+                    ddb_lsi_name = lsi['IndexName']
+                    for key in lsi['KeySchema']:
+                        if key['KeyType'] == 'RANGE':
+                            columns.append(
+                                ColumnDefinition(
+                                    key['AttributeName'],
+                                    type_name='TEXT',
+                                    options={
+                                        'lsi_name': ddb_lsi_name,
+                                        'lsi_key': key['AttributeName']
+                                    }
+                                )
+                            )
             columns.append(
                 ColumnDefinition('document', type_name='JSON', options={'ddb_document': 'true'})
             )
@@ -297,6 +322,23 @@ class DynamoFdw(ForeignDataWrapper):
 
     @property
     @lru_cache()
+    def local_secondary_indexes(self):
+        lsis = []
+        for column in self.columns.values():
+            lsi_name = column.options.get('lsi_name', None)
+            lsi_key = column.options.get('lsi_key', None)
+            if lsi_name is not None and lsi_key is not None:
+                lsis.append(LocalSecondaryIndex(
+                    pg_field_name=column.column_name,
+                    ddb_lsi_name=lsi_name,
+                    ddb_field_name=lsi_key,
+                ))
+            elif lsi_name is not None or lsi_key is not None:
+                log_to_postgres("DynamoDB FDW column must have both lsi_name and lsi_key", ERROR)
+        return lsis
+
+    @property
+    @lru_cache()
     def document_field(self):
         for column in self.columns.values():
             ddb_document = column.options.get('ddb_document', None)
@@ -310,7 +352,7 @@ class DynamoFdw(ForeignDataWrapper):
                 return qual.value
         return not_found_sentinel # None is a valid qual.value; so we don't use None here
 
-    def compute_sort_key_condition(self, quals):
+    def compute_sort_key_condition(self, quals, sort_key):
         # DynamoDB supports these operators on sort keys in KeyConditionExpression:
         # DynamoDB: EQ, PostgreSQL: =
         # DynamoDB: LT, PostgreSQL: <
@@ -324,7 +366,7 @@ class DynamoFdw(ForeignDataWrapper):
         # conditions... and return early with not_found_sentinel of more conditions are present.
         check1, check2 = None, None
         for qual in quals:
-            if qual.field_name == self.sort_key.pg_field_name:
+            if qual.field_name == sort_key.pg_field_name:
                 if qual.operator == '<=':
                     if check2 != None:
                         # had multiple conditions; can't support that
@@ -409,11 +451,21 @@ class DynamoFdw(ForeignDataWrapper):
             'ComparisonOperator': 'EQ',
         }
 
+        sort_key_being_queried = False
         if self.sort_key is not not_found_sentinel:
-            sort_key_cond = self.compute_sort_key_condition(quals)
+            sort_key_cond = self.compute_sort_key_condition(quals, self.sort_key)
             log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
             if sort_key_cond is not not_found_sentinel:
                 query_params['KeyConditions'][self.sort_key.ddb_field_name] = sort_key_cond
+                sort_key_being_queried = True
+
+        if not sort_key_being_queried:
+            for lsi in self.local_secondary_indexes:
+                sort_key_cond = self.compute_sort_key_condition(quals, lsi)
+                if sort_key_cond is not not_found_sentinel:
+                    query_params['KeyConditions'][lsi.ddb_field_name] = sort_key_cond
+                    query_params['IndexName'] = lsi.ddb_lsi_name
+                    break # stop iterating LSIs, we can only use one
 
         log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
         return QueryRowProvider(query_params)
@@ -438,6 +490,9 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
                 # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
                 pg_row['oid'] = json.dumps(pg_row)
+                # populate any local-secondary-index columns for PG-based filtering and consistency/display
+                for lsi in self.local_secondary_indexes:
+                    pg_row[lsi.pg_field_name] = ddb_row.get(lsi.ddb_field_name)
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
                 yield pg_row
         finally:
