@@ -121,7 +121,48 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2 records; DynamoDB scanned 2
 (2 rows)
 ```
 
-Alright, well that's kinda boring.  How about some things that DynamoDB can't do natively?
+You can always perform an EXPLAIN operation on a query to determine what type of DynamoDB interaction it will cause.  In the demo below, you can see that performing a search on the sort_key results in a scan operation; DynamoDB cannot perform a lookup on a sort key without specifying the partition key.  But in the second query where both a partition key and a sort key are provided, an efficient server-side query operation is performed rather than a complete table scan.
+
+```
+=> explain SELECT * FROM fdwtest2 WHERE sort_key = '123' LIMIT 1;
+                                      QUERY PLAN
+---------------------------------------------------------------------------------------
+ Limit  (cost=20.00..420.00 rows=1 width=400)
+   ->  Foreign Scan on fdwtest2  (cost=20.00..40000000000.00 rows=100000000 width=400)
+         Filter: (sort_key = '123'::text)
+         Multicorn: DynamoDB: parallel scan provider; 8 concurrent segments
+         Multicorn:   DynamoDB: pagination provider
+         Multicorn:     DynamoDB: Scan table fdwtest2 from us-west-2
+(6 rows)
+
+=> explain SELECT * FROM fdwtest2 WHERE partition_key = 'woot' and sort_key like 'abc%' LIMIT 1;
+                                      QUERY PLAN
+---------------------------------------------------------------------------------------
+ Limit  (cost=20.00..420.00 rows=1 width=400)
+   ->  Foreign Scan on fdwtest2  (cost=20.00..40000000000.00 rows=100000000 width=400)
+         Filter: ((sort_key ~~ 'abc%'::text) AND (partition_key = 'woot'::text))
+         Multicorn: DynamoDB: pagination provider
+         Multicorn:   DynamoDB: Query table fdwtest2 from us-west-2
+         Multicorn:     {
+         Multicorn:       "KeyConditions": {
+         Multicorn:         "pkey": {
+         Multicorn:           "AttributeValueList": [
+         Multicorn:             "woot"
+         Multicorn:           ],
+         Multicorn:           "ComparisonOperator": "EQ"
+         Multicorn:         },
+         Multicorn:         "skey": {
+         Multicorn:           "AttributeValueList": [
+         Multicorn:             "abc"
+         Multicorn:           ],
+         Multicorn:           "ComparisonOperator": "BEGINS_WITH"
+         Multicorn:         }
+         Multicorn:       }
+         Multicorn:     }
+(21 rows)
+```
+
+All of those things are basically things that DynamoDB can already do, though.  What can we do with the foreign-data wrapper that we can't do natively in DynamoDB?  How about an aggregation...
 
 
 ```
@@ -154,7 +195,7 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 (2 rows)
 ```
 
-Again, it will tend to perform a full-scan and be slow... but that's neat!  Two more little tricks, though...
+Again, it will tend to perform a full-scan and be slow... but that's neat!  Two more little tricks...
 
 ```
 => DELETE FROM fdwtest2
