@@ -499,11 +499,9 @@ class DynamoFdw(ForeignDataWrapper):
             }
             log_to_postgres("partition key is a multi-query for: %r" % (multi_query,), DEBUG)
         else:
-            # Theoretically in the future we could do a multiple-query row provider.  eg.
-            # where partition_key in [a, b, c] could have three queries performed in parallel.
-            # This currently only does one, and any more complex query gets converted into a scan.
             partition_key_value = self.get_optional_exact_field(quals, self.partition_key.pg_field_name)
             if partition_key_value is not_found_sentinel:
+                # No partition key filtering was found in a supported manner, so... scan that.
                 return ParallelScanRowProvider(self.parallel_scan_count)
 
             log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
