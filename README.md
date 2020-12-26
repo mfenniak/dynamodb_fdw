@@ -235,8 +235,8 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
 - Partition & sort key support is exactly one-to-one mapped with what is supported by DynamoDB.  However, dynamodb_fdw could break down the conditions and perform multiple queries that are joined together... for example, (partition_key = 'a' or partition_key = 'b') would result in a full table scan now, but it could result in two query operations instead.
-- Secondary indexes aren't ever used.  It seems possible to automatically match up query attempts with available secondary indexes.
-- Most filtering is done by PostgreSQL, excluding the partition key query.  More filtering operations could be sent to DynamoDB to reduce the amount of data being retrieved.
+- While local secondary indexes are supported, global secondary indexes are not yet, and could be added.
+- Query conditions against sort keys and local secondary indexes need to be very precise... eg. you have to use a supported sort key search, and only a supported sort key search, in order to trigger the optimized query logic.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring sort key conditions.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
 
 ## Thanks
