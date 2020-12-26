@@ -40,6 +40,10 @@ class RowProvider(object):
     def get_rows(self, table):
         raise NotImplementedError()
 
+    def explain(self, verbose, aws_region, table_name):
+        raise NotImplementedError()
+
+
 class PaginatedRowProvider(RowProvider):
     def __init__(self):
         super().__init__()
@@ -64,6 +68,12 @@ class PaginatedRowProvider(RowProvider):
             if last_evaluated_key is None:
                 break
 
+    def explain(self, verbose, aws_region, table_name):
+        yield "DynamoDB: pagination provider"
+        for line in self.explain_page(verbose, aws_region, table_name):
+            yield "  %s" % line
+
+
 class QueryRowProvider(PaginatedRowProvider):
     def __init__(self, query_params):
         super().__init__()
@@ -77,6 +87,13 @@ class QueryRowProvider(PaginatedRowProvider):
         log_to_postgres("performing QUERY operation: %r" % (my_query_params,), DEBUG)
         return table.query(**my_query_params)
 
+    def explain_page(self, verbose, aws_region, table_name):
+        yield "DynamoDB: Query table %s from %s" % (table_name, aws_region)
+        qp = json.dumps(self.query_params, sort_keys=True, indent=2)
+        for line in qp.split('\n'):
+            yield '  %s' % line
+
+
 class ScanRowProvider(PaginatedRowProvider):
     def __init__(self, scan_params):
         super().__init__()
@@ -89,6 +106,10 @@ class ScanRowProvider(PaginatedRowProvider):
             my_scan_params['ExclusiveStartKey'] = last_evaluated_key
         log_to_postgres("performing SCAN operation: %r" % (my_scan_params,), DEBUG)
         return table.scan(**my_scan_params)
+
+    def explain_page(self, verbose, aws_region, table_name):
+        yield "DynamoDB: Scan table %s from %s" % (table_name, aws_region)
+
 
 class ParallelScanIterator(object):
     def __init__(self, queue, workers, threads):
@@ -116,7 +137,8 @@ class ParallelScanIterator(object):
                     raise StopIteration()
             else:
                 return item
-        
+
+
 class ParallelScanThread(threading.Thread):
     def __init__(self, table, row_provider, queue):
         super().__init__()
@@ -139,6 +161,7 @@ class ParallelScanThread(threading.Thread):
                     # we'll try again; but also check for kill_signal
                     pass
         self.queue.put(not_found_sentinel)
+
 
 class ParallelScanRowProvider(RowProvider):
     def __init__(self, parallel_scan_count):
@@ -168,6 +191,11 @@ class ParallelScanRowProvider(RowProvider):
         for t in threads:
             t.start()
         return ParallelScanIterator(queue, len(self.scan_providers), threads)
+
+    def explain(self, verbose, aws_region, table_name):
+        yield "DynamoDB: parallel scan provider; %s concurrent segments" % (self.total_segments)
+        for line in self.scan_providers[0].explain(verbose, aws_region, table_name):
+            yield "  %s" % line
 
 
 class DynamoFdw(ForeignDataWrapper):
@@ -387,6 +415,10 @@ class DynamoFdw(ForeignDataWrapper):
 
         log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
         return QueryRowProvider(query_params)
+
+    def explain(self, quals, columns, sortkeys=None, verbose=False):
+        row_provider = self.plan_query(quals)
+        return row_provider.explain(verbose, aws_region=self.aws_region, table_name=self.table_name)
 
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
