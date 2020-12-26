@@ -588,6 +588,10 @@ class DynamoFdw(ForeignDataWrapper):
         put_item[self.partition_key.ddb_field_name] = value[self.partition_key.pg_field_name]
         if self.sort_key is not not_found_sentinel:
             put_item[self.sort_key.ddb_field_name] = value[self.sort_key.pg_field_name]
+        for lsi in self.local_secondary_indexes:
+            v = value.get(lsi.pg_field_name, not_found_sentinel)
+            if v is not not_found_sentinel:
+                put_item[lsi.ddb_field_name] = v
         self.pending_batch_write.append({
             'PutItem': put_item
         })
