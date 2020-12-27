@@ -60,7 +60,7 @@ DynamoDB is a schema-less system except for the partition & sort keys.  dynamodb
 CREATE FOREIGN TABLE fdwtest2 (
     oid TEXT,
     partition_key TEXT OPTIONS ( mapped_attr 'id', partition_key 'true' ),
-    sort_key TEXT OPTIONS ( mapped_attr 'skey', partition_key 'true' ),
+    sort_key TEXT OPTIONS ( mapped_attr 'skey', sort_key 'true' ),
     lsi_sort_key TEXT OPTIONS (  mapped_attr 'skey2', lsi_name 'lsi1' ),
     gsi_partition_key TEXT OPTIONS ( mapped_attr 'pkey2', gsi_partition_key_gsi_name 'gsi1' ),
     gsi_sort_key TEXT OPTIONS ( mapped_attr 'skey2', gsi_sort_key_gsi_name 'gsi1' ),
