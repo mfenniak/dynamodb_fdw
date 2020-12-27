@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from functools import lru_cache
 from queue import Queue, Full
 import threading
@@ -258,8 +258,8 @@ class DynamoFdw(ForeignDataWrapper):
     Expected/required table schema:
     CREATE FOREIGN TABLE dynamodb (
         oid TEXT,
-        partition_key TEXT OPTIONS ( partition_key 'id' ),
-        sort_key TEXT OPTIONS ( sort_key 'skey' ),
+        partition_key TEXT OPTIONS ( mapped_attribute 'id' partition_key 'true' ),
+        sort_key TEXT OPTIONS ( mapped_attribute 'skey' sort_key 'true' ),
         document JSON OPTIONS ( ddb_document 'true' )
     ) server multicorn_dynamo OPTIONS (
         aws_region 'us-west-2',
@@ -287,19 +287,26 @@ class DynamoFdw(ForeignDataWrapper):
             elif restriction_type == 'except':
                 if table.name in restricts:
                     continue
-            columns = [
-                ColumnDefinition('oid', type_name='TEXT'),
-            ]
+            columns = OrderedDict()
+            columns['oid'] = ColumnDefinition('oid', type_name='TEXT')
             for key in table.key_schema:
-                # FIXME: only string partition/sort keys supported currently
+                # FIXME: only string partition/sort keys supported currently, but no checking here for that
                 if key['KeyType'] == 'HASH':
-                    columns.append(
-                        ColumnDefinition(key['AttributeName'], type_name='TEXT', options={'partition_key': key['AttributeName']})
-                    )
+                    columns[key['AttributeName']] = ColumnDefinition(
+                        key['AttributeName'],
+                        type_name='TEXT',
+                        options={
+                            'mapped_attr': key['AttributeName'],
+                            'partition_key': 'true',
+                        })
                 elif key['KeyType'] == 'RANGE':
-                    columns.append(
-                        ColumnDefinition(key['AttributeName'], type_name='TEXT', options={'sort_key': key['AttributeName']})
-                    )
+                    columns[key['AttributeName']] = ColumnDefinition(
+                        key['AttributeName'],
+                        type_name='TEXT',
+                        options={
+                            'mapped_attr': key['AttributeName'],
+                            'sort_key': 'true'
+                        })
             local_secondary_indexes = table.local_secondary_indexes
             if local_secondary_indexes is not None:
                 for lsi in table.local_secondary_indexes:
@@ -312,18 +319,35 @@ class DynamoFdw(ForeignDataWrapper):
                         # that isn't an ALL projection.
                         continue
                     ddb_lsi_name = lsi['IndexName']
+                    sort_key = None
                     for key in lsi['KeySchema']:
                         if key['KeyType'] == 'RANGE':
-                            columns.append(
-                                ColumnDefinition(
-                                    key['AttributeName'],
-                                    type_name='TEXT',
-                                    options={
-                                        'lsi_name': ddb_lsi_name,
-                                        'lsi_key': key['AttributeName']
-                                    }
-                                )
-                            )
+                            sort_key = key
+                            break
+                    else:
+                        log_to_postgres("DynamoDB LSI on table %s had a no RANGE key and is not supported" % (table.name), WARNING)
+                        continue
+                    column = columns.get(sort_key['AttributeName'], not_found_sentinel)
+                    if column is not_found_sentinel:
+                        column = ColumnDefinition(
+                            sort_key['AttributeName'],
+                            type_name='TEXT',
+                            options={
+                                'lsi_name': ddb_lsi_name,
+                                'mapped_attr': sort_key['AttributeName']
+                            }
+                        )
+                        columns[column.column_name] = column
+                    else:
+                        # column may already ahve an lsi_name on them; or may exist already... all in theory,
+                        # I don't know why this would really happen.  But it is easy to support.
+                        lsi_name = column.options.get('lsi_name', '')
+                        lsi_name += ',%s' % ddb_lsi_name
+                        if lsi_name.startswith(','):
+                            lsi_name = lsi_name[1:]
+                        column.options['lsi_name'] = lsi_name
+                        column.options['mapped_attr'] = sort_key['AttributeName']
+
             global_secondary_indexes = table.global_secondary_indexes
             if global_secondary_indexes is not None:
                 for gsi in table.global_secondary_indexes:
@@ -337,33 +361,38 @@ class DynamoFdw(ForeignDataWrapper):
                         continue
                     ddb_gsi_name = gsi['IndexName']
                     for key in gsi['KeySchema']:
+                        option_name_gsi_name = None
                         if key['KeyType'] == 'HASH':
-                            columns.append(
-                                ColumnDefinition(
-                                    key['AttributeName'],
-                                    type_name='TEXT',
-                                    options={
-                                        'gsi_name': ddb_gsi_name,
-                                        'gsi_partition_key': key['AttributeName']
-                                    }
-                                )
-                            )
+                            option_name_gsi_name = 'gsi_partition_key_gsi_name'
                         elif key['KeyType'] == 'RANGE':
-                            columns.append(
-                                ColumnDefinition(
-                                    key['AttributeName'],
-                                    type_name='TEXT',
-                                    options={
-                                        'gsi_name': ddb_gsi_name,
-                                        'gsi_sort_key': key['AttributeName']
-                                    }
-                                )
+                            option_name_gsi_name = 'gsi_sort_key_gsi_name'
+                        else:
+                            log_to_postgres("DynamoDB GSI on table %s had an unsupported key type and is not supported" % (table.name), WARNING)
+                            break
+
+                        column = columns.get(key['AttributeName'], not_found_sentinel)
+                        if column is not_found_sentinel:
+                            column = ColumnDefinition(
+                                key['AttributeName'],
+                                type_name='TEXT',
+                                options={
+                                    option_name_gsi_name: ddb_gsi_name,
+                                    'mapped_attr': key['AttributeName']
+                                }
                             )
-            columns.append(
-                ColumnDefinition('document', type_name='JSON', options={'ddb_document': 'true'})
-            )
+                            columns[column.column_name] = column
+                        else:
+                            # column may already have an gsi on it; if so, extend it with a new value
+                            gsi_name = column.options.get(option_name_gsi_name, '')
+                            gsi_name += ',%s' % ddb_gsi_name
+                            if gsi_name.startswith(','):
+                                gsi_name = gsi_name[1:]
+                            column.options[option_name_gsi_name] = gsi_name
+                            column.options['mapped_attr'] = key['AttributeName']
+
+            columns['document'] = ColumnDefinition('document', type_name='JSON', options={'ddb_document': 'true'})
             yield TableDefinition(table.name,
-                columns=columns,
+                columns=columns.values(),
                 options={
                     'aws_region': aws_region,
                     'table_name': table.name,
@@ -392,8 +421,9 @@ class DynamoFdw(ForeignDataWrapper):
     def partition_key(self):
         for column in self.columns.values():
             pkey = column.options.get('partition_key', None)
-            if pkey is not None:
-                return KeyField(pg_field_name=column.column_name, ddb_field_name=pkey)
+            mapped_attr = column.options.get('mapped_attr', None)
+            if pkey is not None and mapped_attr is not None:
+                return KeyField(pg_field_name=column.column_name, ddb_field_name=mapped_attr)
         return not_found_sentinel
 
     @property
@@ -401,8 +431,9 @@ class DynamoFdw(ForeignDataWrapper):
     def sort_key(self):
         for column in self.columns.values():
             skey = column.options.get('sort_key', None)
-            if skey is not None:
-                return KeyField(pg_field_name=column.column_name, ddb_field_name=skey)
+            mapped_attr = column.options.get('mapped_attr', None)
+            if skey is not None and mapped_attr is not None:
+                return KeyField(pg_field_name=column.column_name, ddb_field_name=mapped_attr)
         return not_found_sentinel
 
     @property
@@ -410,16 +441,19 @@ class DynamoFdw(ForeignDataWrapper):
     def local_secondary_indexes(self):
         lsis = []
         for column in self.columns.values():
-            lsi_name = column.options.get('lsi_name', None)
-            lsi_key = column.options.get('lsi_key', None)
-            if lsi_name is not None and lsi_key is not None:
-                lsis.append(LocalSecondaryIndex(
-                    pg_field_name=column.column_name,
-                    ddb_lsi_name=lsi_name,
-                    ddb_field_name=lsi_key,
-                ))
-            elif lsi_name is not None or lsi_key is not None:
-                log_to_postgres("DynamoDB FDW column must have both lsi_name and lsi_key", ERROR)
+            lsi_names = column.options.get('lsi_name', None)
+            mapped_attr = column.options.get('mapped_attr', None)
+            if lsi_names is not None and mapped_attr is not None:
+                # This supports having multiple LSIs on the same field... I don't know why you'd ever do this
+                lsi_names = lsi_names.split(',')
+                for lsi_name in lsi_names:
+                    lsis.append(LocalSecondaryIndex(
+                        pg_field_name=column.column_name,
+                        ddb_lsi_name=lsi_name,
+                        ddb_field_name=mapped_attr,
+                    ))
+            elif lsi_names is not None:
+                log_to_postgres("DynamoDB FDW column must have both lsi_name and mapped_attr", ERROR)
         return lsis
 
     @property
@@ -431,21 +465,34 @@ class DynamoFdw(ForeignDataWrapper):
         # first find all the distinct gsi_name's
         gsi_names = set()
         for column in self.columns.values():
-            gsi_name = column.options.get('gsi_name', not_found_sentinel)
-            if gsi_name is not not_found_sentinel:
-                gsi_names.add(gsi_name)
+            gsi_partition_key_gsi_names = column.options.get('gsi_partition_key_gsi_name', not_found_sentinel)
+            if gsi_partition_key_gsi_names is not not_found_sentinel:
+                for gsi_partition_key_gsi_name in gsi_partition_key_gsi_names.split(','):
+                    gsi_names.add(gsi_partition_key_gsi_name)
+            gsi_sort_key_gsi_names = column.options.get('gsi_sort_key_gsi_name', not_found_sentinel)
+            if gsi_sort_key_gsi_names is not not_found_sentinel:
+                for gsi_sort_key_gsi_name in gsi_sort_key_gsi_names.split(','):
+                    gsi_names.add(gsi_sort_key_gsi_name)
 
         for gsi_name in gsi_names:
             for column in self.columns.values():
-                if gsi_name == column.options.get('gsi_name', not_found_sentinel):
-                    gsi = gsi_dict.get(gsi_name, GlobalSecondaryIndex(ddb_gsi_name=gsi_name, partition_key=None, sort_key=not_found_sentinel))
-                    gsi_partition_key = column.options.get('gsi_partition_key', not_found_sentinel)
-                    if gsi_partition_key is not not_found_sentinel:
-                        gsi = gsi._replace(partition_key=KeyField(pg_field_name=column.column_name, ddb_field_name=gsi_partition_key))
-                    gsi_sort_key = column.options.get('gsi_sort_key', not_found_sentinel)
-                    if gsi_sort_key is not not_found_sentinel:
-                        gsi = gsi._replace(sort_key=KeyField(pg_field_name=column.column_name, ddb_field_name=gsi_sort_key))
-                    gsi_dict[gsi_name] = gsi
+                gsi_partition_key_gsi_names = column.options.get('gsi_partition_key_gsi_name', not_found_sentinel)
+                if gsi_partition_key_gsi_names is not not_found_sentinel:
+                    gsi_partition_key_gsi_names = gsi_partition_key_gsi_names.split(',')
+                    if gsi_name in gsi_partition_key_gsi_names:
+                        attr = column.options['mapped_attr']
+                        gsi = gsi_dict.get(gsi_name, GlobalSecondaryIndex(ddb_gsi_name=gsi_name, partition_key=None, sort_key=not_found_sentinel))
+                        gsi = gsi._replace(partition_key=KeyField(pg_field_name=column.column_name, ddb_field_name=attr))
+                        gsi_dict[gsi_name] = gsi
+
+                gsi_sort_key_gsi_names = column.options.get('gsi_sort_key_gsi_name', not_found_sentinel)
+                if gsi_sort_key_gsi_names is not not_found_sentinel:
+                    gsi_sort_key_gsi_names = gsi_sort_key_gsi_names.split(',')
+                    if gsi_name in gsi_sort_key_gsi_names:
+                        attr = column.options['mapped_attr']
+                        gsi = gsi_dict.get(gsi_name, GlobalSecondaryIndex(ddb_gsi_name=gsi_name, partition_key=None, sort_key=not_found_sentinel))
+                        gsi = gsi._replace(sort_key=KeyField(pg_field_name=column.column_name, ddb_field_name=attr))
+                        gsi_dict[gsi_name] = gsi
 
         for gsi in gsi_dict.values():
             if gsi.partition_key is None:
