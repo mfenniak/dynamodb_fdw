@@ -61,9 +61,9 @@ CREATE FOREIGN TABLE fdwtest2 (
     oid TEXT,
     partition_key TEXT OPTIONS ( partition_key 'id' ),
     sort_key TEXT OPTIONS ( sort_key 'skey' ),
-    lsi_sort_key TEXT OPTIONS ( lsi_name 'lsi1', lsi_key 'skey2' ),
-    gsi_partition_key TEXT OPTIONS ( gsi_name 'gsi1', gsi_partition_key 'pkey2' ),
-    gsi_sort_key TEXT OPTIONS ( gsi_name 'gsi1', gsi_sort_key 'skey2' ),
+    lsi_sort_key TEXT OPTIONS ( lsi_name 'lsi1', lsi_attr_name 'skey2' ),
+    gsi_partition_key TEXT OPTIONS ( gsi_partition_key_gsi_name 'gsi1', gsi_attr_name 'pkey2' ),
+    gsi_sort_key TEXT OPTIONS ( gsi_sort_key_gsi_name 'gsi1', gsi_attr_name 'skey2' ),
     document JSON OPTIONS ( ddb_document 'true' )
 ) SERVER multicorn_dynamo OPTIONS (
     aws_region 'us-west-2',
@@ -100,15 +100,15 @@ The fields in this example table are:
 - `lsi_sort_key`
   - A secondary sort-index defined by a local secondary index on on the DynamoDB Table.
   - `lsi_name` option is the name of the local secondary index.
-  - `lsi_key` option is the attribute name indexed on the DynamoDB table.
+  - `lsi_attr_name` option is the attribute name indexed on the DynamoDB table.
   - Foreign schema import will set the PostgreSQL field name to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
   - Specific PostgreSQL query operations on the LSI field will be translated into optimized DynamoDB queries.  Those operations include: single equality check, range checks (>, <, >=, <=), between checks, and LIKE operators that have a single wildcard at the end (eg. "begins with" filters).  All other filters will result in records being downloaded and filtered in PostgreSQL.
   - Only recommended for use on local secondary indexes with projection type "ALL"; otherwise queries that use the local secondary index will return records than queries that do not use the index, which can be very confusing.  Schema import will ignore indexes that don't match this criteria.
 - `gsi_partition_key` and `gsi_sort_key`
   - A secondary partition key and a sort key defined by a global secondary index on the DynamoDB table.
-  - `gsi_name` option is the name of the global secondary index.
-  - `gsi_partition_key` option is the attribute name indexed as the partition key on the DynamoDB global secondary index.
-  - `gsi_sort_key` option is the attribute name indexed as the sort key on the DynamoDB global secondary index; can be omitted if it is a partition-key only index.
+  - `gsi_partition_key_gsi_name` option is the name of the global secondary index.  If this field is a partition key in multiple GSIs, then this can be a comma-separated list.
+  - `gsi_sort_key_gsi_name` option is the name of the global secondary index.  If this field is a sort key in multiple GSIs, then this can be a comma-separated list.
+  - `gsi_attr_name` option is the attribute name indexed as the partition or key sort key on the DynamoDB global secondary index.
   - Foreign schema import will set the PostgreSQL field names to the DynamoDB sort key name, which often requires quoting if it is not entirely lower-cased and alphanumeric.
   - Specific PostgreSQL query operations on the GSI partition key & sort keys will be translated into optimized DynamoDB query.  The rules followed are the same as those for the `partition_key` and `sort_key` field.
   - Only recommended for use on global secondary indexes with projection type "ALL"; otherwise queries that use the local secondary index will return records than queries that do not use the index, which can be very confusing.  Schema import will ignore indexes that don't match this criteria.
@@ -252,10 +252,11 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 
 - Query conditions against sort keys and local secondary indexes need to be very precise to be included in the DynamoDB query.  You have to use a supported sort key filter, and **only** a supported sort key search.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring multiple sort key conditions.
 - When multiple Query operations are used (eg. `partition_key IN ('a', 'b', 'c')`), then all queries are run sequentially.  Adding parallelism here could help with performance, but we'd to limit the parallelism to a maximum count.
+- A DynamoDB table may have multiple GSIs defined on the same attribute, with different sort keys.  dynamodb_fdw will somewhat randomly select which GSI to use when querying against the partition key.  In theory it could take into account any conditions on the sort keys and choose the most optimal GSI.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
 - It might be nice to map arbitrary DynamoDB attributes into the table for easy access.  However, DynamoDB attributes can change types arbitrarily on different records.  Ideally we'd support the PostgreSQL column being a `json` type, **or**, the PostgreSQL column being a specific type and throwing errors when objects don't match the expected values.  Unfortunately we couldn't to any of this during a schema import because it would be pretty application-opinionated, so it's likely not a feature that would be used much.
-- In DynamoDB, there are no restrictions on attributes being re-used in global & local secondary indexes.  However dynamodb_fdw hasn't been tested in any configuration like this; it currently assumes the partition & sort keys of secondary indexes don't overlap with each other (except the partition key of a local secondary index).
 - Only string partition & sort keys are supported currently.
+- Might be nice to map DynamoDB attribute name styling to PostgreSQL name styling when doing a foreign schema import.
 
 ## Thanks
 
