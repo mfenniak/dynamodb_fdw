@@ -28,6 +28,8 @@ not_found_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 LocalSecondaryIndex = namedtuple('LocalSecondaryIndex', ['pg_field_name', 'ddb_lsi_name', 'ddb_field_name'])
 GlobalSecondaryIndex = namedtuple('GlobalSecondaryIndex', ['partition_key', 'sort_key', 'ddb_gsi_name'])
+QueryPlan = namedtuple('QueryPlan', ['row_provider', 'score'])
+SortKeyQueryClause = namedtuple('SortKeyQueryClause', ['query_clause', 'score'])
 
 class RowProvider(object):
     # "abstract" properties expected to be implemented:
@@ -515,156 +517,168 @@ class DynamoFdw(ForeignDataWrapper):
                 return qual.value
         return not_found_sentinel # None is a valid qual.value; so we don't use None here
 
-    def compute_sort_key_condition(self, quals, sort_key):
+    def plan_sort_key_query_clauses(self, quals, sort_key):
+        # Yield instances of SortKeyQueryClause = namedtuple('SortKeyQueryClause', ['query_clause', 'score'])
         # DynamoDB supports these operators on sort keys in KeyConditionExpression:
-        # DynamoDB: EQ, PostgreSQL: =
-        # DynamoDB: LT, PostgreSQL: <
-        # DynamoDB: LE, PostgreSQL: <=
-        # DynamoDB: GT, PostgreSQL: >
-        # DynamoDB: GE, PostgreSQL: >=
-        # DynamoDB: BETWEEN, PostgreSQL: my_sort_key >= b, my_sort_key <= c
-        # DynamoDB: BEGINS_WITH, PostgreSQL: my_sort_key ~~ abc%
-
-        # Search for any conditions on the sort key; we support a max of two conditions, but only specific
-        # conditions... and return early with not_found_sentinel of more conditions are present.
-        check1, check2 = None, None
+        # DynamoDB: EQ, PostgreSQL: =;                                       score 7/7
+        # DynamoDB: BETWEEN, PostgreSQL: my_sort_key >= b, my_sort_key <= c; score 6/7
+        # DynamoDB: BEGINS_WITH, PostgreSQL: my_sort_key ~~ abc%;            score 5/6
+        # DynamoDB: LT, PostgreSQL: <,                                       score 4/7
+        # DynamoDB: GT, PostgreSQL: >,                                       score 3/7
+        # DynamoDB: LE, PostgreSQL: <=,                                      score 2/7
+        # DynamoDB: GE, PostgreSQL: >=,                                      score 1/7
+        operator_scores = {
+            'EQ': 7,
+            'BETWEEN': 6,
+            'BEGINS_WITH': 5,
+            'LT': 4,
+            'GT': 3,
+            'LE': 2,
+            'GE': 1,
+        }
+        pg_op_to_ddb_op = {
+            '=': 'EQ',
+            '<': 'LT',
+            '<=': 'LE',
+            '>': 'GT',
+            '>=': 'GE',
+        }
+        between_ge, between_le = not_found_sentinel, not_found_sentinel
         for qual in quals:
             if qual.field_name == sort_key.pg_field_name:
-                if qual.operator == '<=':
-                    if check2 != None:
-                        # had multiple conditions; can't support that
-                        return not_found_sentinel
-                    check2 = qual
-                elif qual.operator in ('=', '<', '>', '>=', '~~'):
-                    if check1 != None:
-                        # had multiple conditions; can't support that
-                        return not_found_sentinel
-                    check1 = qual
+                if qual.operator == '<=' and between_le is not_found_sentinel:
+                    between_le = qual.value
+                elif qual.operator == '>=' and between_ge is not_found_sentinel:
+                    between_ge = qual.value
 
-        # Looks like we could be a BETWEEN query...
-        if check1 is not None and check2 is not None:
-            # Only supported if it's >= and <=, because we can convert that to between
-            if check2.operator != '<=' or check1.operator != '>=':
-                return not_found_sentinel
-            return {
-                'ComparisonOperator': 'BETWEEN',
-                'AttributeValueList': [
-                    check1.value,
-                    check2.value,
-                ]
-            }
+                if qual.operator in pg_op_to_ddb_op:
+                    yield SortKeyQueryClause(
+                        query_clause={
+                            'ComparisonOperator': pg_op_to_ddb_op[qual.operator],
+                            'AttributeValueList': [
+                                qual.value,
+                            ]
+                        },
+                        score=operator_scores[pg_op_to_ddb_op[qual.operator]] / 7.0,
+                    )
+                if qual.operator == '~~':
+                    # Can be converted into BEGINS_WITH if it only has a single % and it's at the end
+                    # Also have to deal with the fact that there could be \% and \_ in the string -- escaped literals.
+                    # First check if it's valid to convert to BEGINS_WITH.
+                    pattern_without_escaped_wildcards = qual.value.replace("\\%", "").replace("\\_", "")
+                    if not pattern_without_escaped_wildcards.endswith("%") or "_" in pattern_without_escaped_wildcards or "%" in pattern_without_escaped_wildcards[:-1]:
+                        continue
+                    # pattern supported
+                    # Remove the trailing % wildcard, and convert the escaped literals to literals.
+                    pattern_with_unescaped_wildcards = qual.value[:-1].replace("\\%", "%").replace("\\_", "_")
+                    yield SortKeyQueryClause(
+                        query_clause={
+                            'ComparisonOperator': 'BEGINS_WITH',
+                            'AttributeValueList': [
+                                pattern_with_unescaped_wildcards
+                            ]
+                        },
+                        score=operator_scores['BEGINS_WITH'] / 7.0,
+                    )
 
-        if check2 is not None:
-            # half a BETWEEN; we should only get here if check1 was None
-            check1 = check2
-
-        if check1 is not None:
-            op = check1.operator
-
-            if check1.operator == '~~':
-                # Can be converted into BEGINS_WITH if it only has a single % and it's at the end
-                # Also have to deal with the fact that there could be \% and \_ in the string -- escaped literals.
-
-                # First check if it's valid to convert to BEGINS_WITH.
-                pattern_without_escaped_wildcards = check1.value.replace("\\%", "").replace("\\_", "")
-                if not pattern_without_escaped_wildcards.endswith("%") or "_" in pattern_without_escaped_wildcards or "%" in pattern_without_escaped_wildcards[:-1]:
-                    # pattern not supported
-                    return not_found_sentinel
-
-                # Remove the trailing % wildcard, and convert the escaped literals to literals.
-                pattern_with_unescaped_wildcards = check1.value[:-1].replace("\\%", "%").replace("\\_", "_")
-                return {
-                    'ComparisonOperator': 'BEGINS_WITH',
+        if between_ge is not not_found_sentinel and between_le is not not_found_sentinel:
+            # Looks like we could be a BETWEEN query...
+            yield SortKeyQueryClause(
+                query_clause={
+                    'ComparisonOperator': 'BETWEEN',
                     'AttributeValueList': [
-                        pattern_with_unescaped_wildcards
+                        between_ge,
+                        between_le,
                     ]
-                }
+                },
+                score=operator_scores['BETWEEN'] / 7.0,
+            )
 
-            op = {
-                '=': 'EQ',
-                '<': 'LT',
-                '<=': 'LE',
-                '>': 'GT',
-                '>=': 'GE',
-            }
-            return {
-                'ComparisonOperator': op[check1.operator],
-                'AttributeValueList': [
-                    check1.value
-                ]
-            }
+    def plan_single_query(self, quals, partition_key, sort_key, local_secondary_indexes, index_name, pkey_score_bonus):
+        partition_key_value = self.get_optional_exact_field(quals, partition_key.pg_field_name)
+        if partition_key_value is not_found_sentinel:
+            # Can't filter on this partition_key
+            return
 
-        return not_found_sentinel
-
-    def plan_by_key_pattern(self, quals, partition_key, sort_key, local_secondary_indexes, index_name=None):
-        # Search for any multi-partition-key qualifiers; eg. partition_key IN ('1, '2')
-        # Those will be specialized to a multi-Query operation.
-        multi_query = None
-        for qual in quals:
-            if qual.field_name == partition_key.pg_field_name and qual.list_any_or_all is ANY and qual.operator[0] == '=':
-                multi_query = qual.value
-                break
-
-        if multi_query is not None:
-            # init query_params so that we can put sort-key or LSI info into it; but it won't
-            # contain the multi_query data
-            query_params = {
-                'KeyConditions': {}
-            }
-            log_to_postgres("partition key is a multi-query for: %r" % (multi_query,), DEBUG)
-        else:
-            partition_key_value = self.get_optional_exact_field(quals, partition_key.pg_field_name)
-            if partition_key_value is not_found_sentinel:
-                # Can't filter on this partition_key
-                return None
-
-            log_to_postgres("partition_key_value search for: %r" % (partition_key_value,), DEBUG)
-            query_params = {
-                'KeyConditions': {}
-            }
-            query_params['KeyConditions'][partition_key.ddb_field_name] = {
-                'AttributeValueList': [partition_key_value],
-                'ComparisonOperator': 'EQ',
-            }
-
+        query_params = {
+            'KeyConditions': {}
+        }
+        query_params['KeyConditions'][partition_key.ddb_field_name] = {
+            'AttributeValueList': [partition_key_value],
+            'ComparisonOperator': 'EQ',
+        }
         if index_name is not None:
             query_params['IndexName'] = index_name
 
-        sort_key_being_queried = False
+        pkey_base_score = (pkey_score_bonus * 50) + 50 # bonus for a single-EQ partition key search
+        yield QueryPlan(row_provider=QueryRowProvider(query_params), score=pkey_base_score)
+
+        for qp in self.plan_sort_key_options(query_params, quals, sort_key, local_secondary_indexes, index_name, pkey_base_score):
+            yield qp
+
+    def plan_multi_query(self, quals, partition_key, sort_key, local_secondary_indexes, index_name, pkey_score_bonus):
+        # Search for any multi-partition-key qualifiers; eg. partition_key IN ('1, '2')
+        # Those will be specialized to a multi-Query operation.
+        for qual in quals:
+            if qual.field_name == partition_key.pg_field_name and qual.list_any_or_all is ANY and qual.operator[0] == '=':
+                multi_query = qual.value
+                # init query_params so that we can put sort-key or LSI info into it; but it won't
+                # contain the multi_query data
+                query_params = {
+                    'KeyConditions': {}
+                }
+                log_to_postgres("partition key is a multi-query for: %r" % (multi_query,), DEBUG)
+                if index_name is not None:
+                    query_params['IndexName'] = index_name
+
+                pkey_base_score = (pkey_score_bonus * 50)
+                yield QueryPlan(row_provider=MultiQueryRowProvider(partition_key, multi_query, query_params), score=pkey_base_score)
+
+                for orig_qp in self.plan_sort_key_options(query_params, quals, sort_key, local_secondary_indexes, index_name, pkey_base_score):
+                    # convert the row_provider in the qp from a QueryRowProvider to a MultiQueryRowProvider
+                    yield QueryPlan(row_provider=MultiQueryRowProvider(partition_key, multi_query, orig_qp.row_provider.query_params), score=orig_qp.score)
+
+    def plan_sort_key_options(self, query_params, quals, sort_key, local_secondary_indexes, index_name, pkey_base_score):
         if sort_key is not not_found_sentinel:
-            sort_key_cond = self.compute_sort_key_condition(quals, sort_key)
-            log_to_postgres("sort_key_cond repr: %r" % (sort_key_cond,), DEBUG)
-            if sort_key_cond is not not_found_sentinel:
-                query_params['KeyConditions'][sort_key.ddb_field_name] = sort_key_cond
-                sort_key_being_queried = True
+            if index_name is None:
+                # querying against primary partition key + sort key is the best
+                sort_key_bonus_score = 1
+            else:
+                # querying against a GSI's partition key is good too
+                sort_key_bonus_score = 0.5
+            for skqc in self.plan_sort_key_query_clauses(quals, sort_key):
+                score = pkey_base_score + (sort_key_bonus_score * skqc.score * 50)
+                qp = json.loads(json.dumps(query_params)) # deep clone to avoid mutating
+                qp['KeyConditions'][sort_key.ddb_field_name] = skqc.query_clause
+                yield QueryPlan(row_provider=QueryRowProvider(qp), score=score)
 
-        if not sort_key_being_queried:
-            for lsi in local_secondary_indexes:
-                sort_key_cond = self.compute_sort_key_condition(quals, lsi)
-                if sort_key_cond is not not_found_sentinel:
-                    if index_name is not None:
-                        log_to_postgres("plan_by_key_pattern is conflicted on an LSI and a GSI?", ERROR)
-                    query_params['KeyConditions'][lsi.ddb_field_name] = sort_key_cond
-                    query_params['IndexName'] = lsi.ddb_lsi_name
-                    break # stop iterating LSIs, we can only use one
+        for lsi in local_secondary_indexes:
+            sort_key_bonus_score = 0.01 # querying LSIs is not as prefered as other sort keys
+            for skqc in self.plan_sort_key_query_clauses(quals, lsi):
+                score = pkey_base_score + (sort_key_bonus_score * skqc.score * 50)
+                qp = json.loads(json.dumps(query_params)) # deep clone to avoid mutating
+                qp['KeyConditions'][lsi.ddb_field_name] = skqc.query_clause
+                qp['IndexName'] = lsi.ddb_lsi_name
+                yield QueryPlan(row_provider=QueryRowProvider(qp), score=score)
 
-        log_to_postgres("query_params repr: %r" % (query_params,), DEBUG)
-        if multi_query is not None:
-            return MultiQueryRowProvider(partition_key, multi_query, query_params)
-        else:
-            return QueryRowProvider(query_params)
+    def plan_by_key_pattern(self, quals, partition_key, sort_key, local_secondary_indexes, index_name, pkey_score_bonus):
+        for qp in self.plan_multi_query(quals, partition_key, sort_key, local_secondary_indexes, index_name, pkey_score_bonus):
+            yield qp
+        for qp in self.plan_single_query(quals, partition_key, sort_key, local_secondary_indexes, index_name, pkey_score_bonus):
+            yield qp
 
     def plan_query(self, quals):
-        partition_key_plan = self.plan_by_key_pattern(quals, self.partition_key, self.sort_key, self.local_secondary_indexes)
-        if partition_key_plan is not None:
-            return partition_key_plan
-
+        query_plans = [
+            QueryPlan(row_provider=ParallelScanRowProvider(self.parallel_scan_count), score=0),
+        ]
+        query_plans.extend(self.plan_by_key_pattern(quals, self.partition_key, self.sort_key, self.local_secondary_indexes, None, pkey_score_bonus=1))
         for gsi in self.global_secondary_indexes:
-            gsi_plan = self.plan_by_key_pattern(quals, gsi.partition_key, gsi.sort_key, [], gsi.ddb_gsi_name)
-            if gsi_plan is not None:
-                return gsi_plan
+            query_plans.extend(self.plan_by_key_pattern(quals, gsi.partition_key, gsi.sort_key, [], gsi.ddb_gsi_name, pkey_score_bonus=0.1))
 
-        return ParallelScanRowProvider(self.parallel_scan_count)
+        query_plans.sort(key=lambda qp: qp.score, reverse=True)
+        # FIXME: should find some way to make visibility into the query plans considered, maybe?
+        log_to_postgres("plan_query found %s valid query plans; selecting the top scoring at score = %s" % (len(query_plans), query_plans[0].score,), DEBUG)
+        return query_plans[0].row_provider
 
     def explain(self, quals, columns, sortkeys=None, verbose=False):
         row_provider = self.plan_query(quals)

@@ -261,9 +261,7 @@ DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write 
 
 dynamodb_fdw could be a bit more still, I think.  Here are some areas that it could be improved in the future:
 
-- Query conditions against sort keys and local secondary indexes need to be very precise to be included in the DynamoDB query.  You have to use a supported sort key filter, and **only** a supported sort key search.  It would make sense to send the "most selective" query to DynamoDB rather than ignoring multiple sort key conditions.
-- When multiple Query operations are used (eg. `partition_key IN ('a', 'b', 'c')`), then all queries are run sequentially.  Adding parallelism here could help with performance, but we'd to limit the parallelism to a maximum count.
-- A DynamoDB table may have multiple GSIs defined on the same attribute, with different sort keys.  dynamodb_fdw will somewhat randomly select which GSI to use when querying against the partition key.  In theory it could take into account any conditions on the sort keys and choose the most optimal GSI.
+- When multiple Query operations are used, to support multiple partition key values (eg. `partition_key IN ('a', 'b', 'c')`), then all queries are run sequentially.  Adding parallelism here could help with performance, but we'd to limit the parallelism to a maximum count.
 - Haven't performed any testing on how the FDW works when DynamoDB is throttling API requests; I suspect it will not work well.
 - It might be nice to map arbitrary DynamoDB attributes into the table for easy access.  However, DynamoDB attributes can change types arbitrarily on different records.  Ideally we'd support the PostgreSQL column being a `json` type, **or**, the PostgreSQL column being a specific type and throwing errors when objects don't match the expected values.  Unfortunately we couldn't to any of this during a schema import because it would be pretty application-opinionated, so it's likely not a feature that would be used much.
 - Only string partition & sort keys are supported currently.
