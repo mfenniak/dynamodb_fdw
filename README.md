@@ -273,10 +273,17 @@ If you want to develop on dynamodb_fdw, you can use the devshell provided by `fl
 
 ```
 initdb -D ./tmp
+```
+
+If you're using NixOS, you'll find that PostgreSQL will fail to startup due to the `unix_socket_directories` default setting.  Edit tmp/postgresql.conf and change `unix_socket_directories = ''` to remove the default `/run/postgresql` directory, allowing only TCP connections.  If you're not using NixOS, you can ignore this step.
+
+Then start the PostgreSQL server:
+
+```
 postgres -D ./tmp
 ```
 
-You can then connect to the running PostgreSQL instance:
+You can then connect to the running PostgreSQL instance and run commands to set-up, use, and test the dynamodb_fdw module.  Here's an example of setting up the module and querying a table:
 
 ```
 $ psql -h localhost postgres $(whoami)
