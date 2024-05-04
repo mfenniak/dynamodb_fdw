@@ -25,6 +25,7 @@ class MyJsonEncoder(json.JSONEncoder):
         return super().default(o)
 
 not_found_sentinel = object()
+exception_sentinel = object()
 KeyField = namedtuple('KeyField', ['pg_field_name', 'ddb_field_name'])
 LocalSecondaryIndex = namedtuple('LocalSecondaryIndex', ['pg_field_name', 'ddb_lsi_name', 'ddb_field_name'])
 GlobalSecondaryIndex = namedtuple('GlobalSecondaryIndex', ['partition_key', 'sort_key', 'ddb_gsi_name'])
@@ -172,6 +173,7 @@ class ParallelScanIterator(object):
         self.queue = queue
         self.workers = workers
         self.threads = threads
+        self.had_exception = False
 
     def __del__(self):
         for thread in self.threads:
@@ -186,9 +188,14 @@ class ParallelScanIterator(object):
     def next(self):
         while True:
             item = self.queue.get()
-            if item is not_found_sentinel:
+            if item is not_found_sentinel or item is exception_sentinel:
+                self.had_exception = self.had_exception or item is exception_sentinel
                 self.workers -= 1
                 if self.workers == 0:
+                    if self.had_exception:
+                        for thread in self.threads:
+                            if thread.exception is not None:
+                                raise thread.exception
                     raise StopIteration()
             else:
                 return item
@@ -201,21 +208,26 @@ class ParallelScanThread(threading.Thread):
         self.queue = queue
         self.table = table
         self.kill_signal = False
+        self.exception = None
 
     def run(self):
-        for row in self.row_provider.get_rows(self.table):
-            while True:
-                if self.kill_signal:
-                    # This will only happen if our iterator has been deleted, in which case putting
-                    # the not_found_sentinel into the queue doesn't matter
-                    return
-                try:
-                    self.queue.put(row, timeout=1)
-                    break
-                except Full:
-                    # we'll try again; but also check for kill_signal
-                    pass
-        self.queue.put(not_found_sentinel)
+        try:
+            for row in self.row_provider.get_rows(self.table):
+                while True:
+                    if self.kill_signal:
+                        # This will only happen if our iterator has been deleted, in which case putting
+                        # the not_found_sentinel into the queue doesn't matter
+                        return
+                    try:
+                        self.queue.put(row, timeout=1)
+                        break
+                    except Full:
+                        # we'll try again; but also check for kill_signal
+                        pass
+            self.queue.put(not_found_sentinel)
+        except Exception as e:
+            self.exception = e
+            self.queue.put(exception_sentinel)
 
 
 class ParallelScanRowProvider(RowProvider):
