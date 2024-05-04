@@ -320,7 +320,7 @@ FDW options: (aws_region 'us-west-2', parallel_scan_count '8', table_name 'fdwte
 postgres=# \x
 Expanded display is on.
 
-postgres=# select * from ddb_usw2.fdwtest3 limit 1;
+postgres=# SELECT * FROM ddb_usw2.fdwtest3 LIMIT 1;
 -[ RECORD 1 ]-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 oid                     | {"TenantId": "urn:tenant:6", "UserId": "urn:tenant:6:user:1"}
 TenantId                | urn:tenant:6
