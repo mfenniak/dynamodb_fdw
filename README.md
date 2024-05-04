@@ -267,6 +267,74 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 - Only string partition & sort keys are supported currently.
 - Might be nice to map DynamoDB attribute name styling to PostgreSQL name styling when doing a foreign schema import.
 
+## Development Environment (using nix)
+
+If you want to develop on dynamodb_fdw, you can use the devshell provided by `flake.nix`, and the [nix-direnv](https://github.com/nix-community/nix-direnv) tool.  This will automatically set up a PostgreSQL system with Multicorn2 available, a Python with Multicorn2 available, and configure PYTHONPATH so that the current working directory is included for development purposes.  Once you're up and running in a nix-direnv shell, you'll need to start a PostgreSQL server:
+
+```
+initdb -D ./tmp
+postgres -D ./tmp
+```
+
+You can then connect to the running PostgreSQL instance:
+
+```
+$ psql -h localhost postgres $(whoami)
+
+psql (15.6)
+Type "help" for help.
+
+postgres=# CREATE EXTENSION multicorn;
+CREATE EXTENSION
+
+postgres=# CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn
+    options (
+        wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw'
+    );
+CREATE SERVER
+
+postgres=# CREATE SCHEMA ddb_usw2;
+CREATE SCHEMA
+
+postgres=# IMPORT FOREIGN SCHEMA dynamodb
+    FROM SERVER multicorn_dynamo
+    INTO ddb_usw2
+    OPTIONS ( aws_region 'us-west-2' );
+IMPORT FOREIGN SCHEMA
+
+postgres=# \d ddb_usw2.fdwtest3
+                                                             Foreign table "ddb_usw2.fdwtest3"
+         Column          | Type | Collation | Nullable | Default |                                       FDW options
+-------------------------+------+-----------+----------+---------+------------------------------------------------------------------------------------------
+ oid                     | text |           |          |         |
+ TenantId                | text |           |          |         | (mapped_attr 'TenantId', partition_key 'true')
+ UserId                  | text |           |          |         | (mapped_attr 'UserId', sort_key 'true')
+ UserLastName            | text |           |          |         | (lsi_name 'UserLastNameLsi', mapped_attr 'UserLastName')
+ DepartmentId            | text |           |          |         | (gsi_partition_key_gsi_name 'DepartmentGsi2,DepartmentGsi1', mapped_attr 'DepartmentId')
+ DepartmentSomethingElse | text |           |          |         | (gsi_sort_key_gsi_name 'DepartmentGsi2', mapped_attr 'DepartmentSomethingElse')
+ DepartmentHierarchy     | text |           |          |         | (gsi_sort_key_gsi_name 'DepartmentGsi1', mapped_attr 'DepartmentHierarchy')
+ document                | json |           |          |         | (ddb_document 'true')
+Server: multicorn_dynamo
+FDW options: (aws_region 'us-west-2', parallel_scan_count '8', table_name 'fdwtest3')
+
+postgres=# \x
+Expanded display is on.
+
+postgres=# select * from ddb_usw2.fdwtest3 limit 1;
+-[ RECORD 1 ]-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+oid                     | {"TenantId": "urn:tenant:6", "UserId": "urn:tenant:6:user:1"}
+TenantId                | urn:tenant:6
+UserId                  | urn:tenant:6:user:1
+UserLastName            | User 1 Guy
+DepartmentId            | urn:tenant:6:department:1
+DepartmentSomethingElse | SomethingElse
+DepartmentHierarchy     | 00186
+document                | {"UserId": "urn:tenant:6:user:1", "UserLastName": "User 1 Guy", "UValue": 1, "DepartmentSomethingElse": "SomethingElse", "DepartmentId": "urn:tenant:6:department:1", "TenantId": "urn:tenant:6", "SValue": 6, "DepartmentHierarchy": "00186"}
+
+```
+
+If you change the code in the `dynamodbfdw` directory, you will need to shutdown Postgres and restart it to reload the updated module.
+
 ## Thanks
 
 This is a fork of Fabio Rueda's original DynamoDB FDW implementation, https://github.com/avances123/dynamodb_fdw.  Not much remains of that original code base, but I thank Fabio for providing a great starting point!

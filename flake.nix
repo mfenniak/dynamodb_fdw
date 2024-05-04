@@ -17,11 +17,11 @@
       pkgs = nixpkgs.legacyPackages.${system};
       postgresql = pkgs.postgresql;
       python = pkgs.python3;
+      # flakeDir = builtins.toString ./.; # Dynamically get the flake directory
     in {
       devShells.default =
         pkgs.mkShell {
-          buildInputs = [];
-          packages = [
+          buildInputs = [
             (python.withPackages (python-pkgs: [
               # select Python packages here
               python-pkgs.boto3
@@ -32,6 +32,11 @@
               (mfenniak.packages.${system}.multicorn2 postgresql python)
             ]))
           ];
+          packages = [
+          ];
+          shellHook = ''
+            export PYTHONPATH=''${PYTHONPATH:+$PYTHONPATH:}$PWD
+          '';
         };
     });
 }
