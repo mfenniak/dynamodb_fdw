@@ -17,7 +17,6 @@
       pkgs = nixpkgs.legacyPackages.${system};
       postgresql = pkgs.postgresql;
       python = pkgs.python3;
-      # flakeDir = builtins.toString ./.; # Dynamically get the flake directory
     in {
       devShells.default =
         pkgs.mkShell {
