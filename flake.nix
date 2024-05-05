@@ -139,8 +139,8 @@
             #!${pkgs.runtimeShell}
             set -e
             ${pkgs.dockerTools.shadowSetup}
-            groupadd --system -g 999 postgres
-            useradd --system --no-create-home -u 999 -g 999 postgres
+            groupadd --system -g 999 postgres --extrausers
+            useradd --system --no-create-home -u 999 -g 999 postgres --extrausers
             chown -R postgres:postgres data
           '';
           enableFakechroot = true;
