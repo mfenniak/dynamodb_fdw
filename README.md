@@ -339,7 +339,7 @@ document                | {"UserId": "urn:tenant:6:user:1", "UserLastName": "Use
 
 ```
 
-If you change the code in the `dynamodbfdw` directory, you will need to shutdown Postgres and restart it to reload the updated module.
+If you change the code in the `dynamodbfdw` directory, you will need to disconnect and reconnect to the PostgreSQL server to see the changes.
 
 ## Thanks
 
