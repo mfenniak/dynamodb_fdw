@@ -266,7 +266,9 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 - Only string partition & sort keys are supported currently.
 - Might be nice to map DynamoDB attribute name styling to PostgreSQL name styling when doing a foreign schema import.
 
-## Development Environment (using nix)
+## Development
+
+### Development Environment (w/ nix)
 
 If you want to develop on dynamodb_fdw, you can use the devshell provided by `flake.nix`, and the [nix-direnv](https://github.com/nix-community/nix-direnv) tool.  This will automatically set up a PostgreSQL system with Multicorn2 available, a Python with Multicorn2 available, and configure PYTHONPATH so that the current working directory is included for development purposes.  Once you're up and running in a nix-direnv shell, you'll need to start a PostgreSQL server:
 
@@ -340,6 +342,14 @@ document                | {"UserId": "urn:tenant:6:user:1", "UserLastName": "Use
 ```
 
 If you change the code in the `dynamodbfdw` directory, you will need to disconnect and reconnect to the PostgreSQL server to see the changes.
+
+### Testing
+
+dynamodb_fdw has two sets of tests; unit tests that run without a PostgreSQL database or an AWS account, and integration tests that require both.  Both test suites are... petite.  But it's a start!
+
+Using the nix development environment, run all tests with `pytest`, the unit tests with `pytest dynamodbfdw`, and the integration tests with `pytest tests/integration`.
+
+The integration tests require a running PostgreSQL server on localhost port 5432, as described in the development environment documentation above, plus active AWS credentials with permissions to list, create, and modify DynamoDB tables in the us-east-1 region.  All interactions with AWS will take place there.  The integration tests do not cleanup after themselves, but at least empty DynamoDB tables don't cost anything.
 
 ## Thanks
 
