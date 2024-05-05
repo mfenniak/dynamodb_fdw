@@ -14,9 +14,15 @@
 
   outputs = { self, nixpkgs, flake-utils, mfenniak }:
     flake-utils.lib.eachDefaultSystem (system: let
+      debugBuild = false;
       pkgs = nixpkgs.legacyPackages.${system};
-      postgresql = pkgs.postgresql;  # .overrideAttrs (oldAttrs: { dontStrip = true; });  If debug symbols are needed.
+      postgresql = pkgs.postgresql.overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild { dontStrip = true; }); # If debug symbols are needed.
       python = pkgs.python3;
+      multicorn2 = (mfenniak.packages.${system}.multicorn2 postgresql python)
+        .overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild {
+          env.NIX_CFLAGS_COMPILE = "-O0 -g";
+          dontStrip = true;
+        }); # If debug symbols are needed.
     in {
       devShells.default = pkgs.mkShell {
         buildInputs = [
@@ -26,10 +32,11 @@
             (mfenniak.packages.${system}.multicorn2Python postgresql python)
           ]))
           (postgresql.withPackages (p: [
-            (mfenniak.packages.${system}.multicorn2 postgresql python)
+            multicorn2
           ]))
         ];
         packages = [
+          pkgs.gdb
         ];
         shellHook = ''
           export PYTHONPATH=''${PYTHONPATH:+$PYTHONPATH:}$PWD
@@ -73,10 +80,7 @@
           (fdwPackage python)
         ]);
         postgresqlWithDynamodb_fdw = postgresql.withPackages (p: [
-          (
-            (mfenniak.packages.${system}.multicorn2 postgresql python)
-            # .overrideAttrs (oldAttrs: { dontStrip = true; })   If debug symbols are needed.
-          )
+          multicorn2
         ]);
 
         # Write an init script for the docker container that will check /data for a postgresql.conf file; if not
@@ -140,11 +144,12 @@
             pkgs.coreutils
             pythonWithDynamodb_fdw
             postgresqlWithDynamodb_fdw
+          ] ++ pkgs.lib.optional debugBuild [
             # If debug tooling is needed:
-            # pkgs.gdb
-            # pkgs.procps
-            # pkgs.findutils
-            # pkgs.gnugrep
+            pkgs.gdb
+            pkgs.procps
+            pkgs.findutils
+            pkgs.gnugrep
           ];
 
           config = {
