@@ -40,11 +40,11 @@ Once running, you can use any PostgreSQL client to access the DB as the **postgr
 A little bit of initialization is required to create the dynamodb_fdw:
 
 ```
-  CREATE EXTENSION multicorn;
-  CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn
-  options (
-      wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw'
-  );
+CREATE EXTENSION multicorn;
+CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn
+options (
+    wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw'
+);
 ```
 
 Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  You can do this very quickly by using the [IMPORT FOREIGN SCHEMA](https://www.postgresql.org/docs/12/sql-importforeignschema.html) functionality.  In the below example, the PG schema ddb_usw2 is created, and all DynamoDB tables in the us-west-2 region are imported into that schema:
