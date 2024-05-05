@@ -36,6 +36,16 @@
         '';
       };
 
+      devShells.codebuild =
+        pkgs.mkShell {
+          buildInputs = [ ];
+          packages = [
+            pkgs.gnused
+            pkgs.docker
+            pkgs.curl
+          ];
+        };
+
       packages = let
         fdwVersion = "9.9";
         fdwPackage = python: python.pkgs.buildPythonPackage rec {
