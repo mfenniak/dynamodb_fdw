@@ -101,6 +101,9 @@
             echo "*** This is insecure and should only be used for development purposes. ***"
             echo ""
             echo "host all all all trust" >> /data/pg_hba.conf
+            # Init multicorn and the multicorn_dynamo server.
+            echo "CREATE EXTENSION multicorn; CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn options ( wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw' )" \
+              | ${postgresqlWithDynamodb_fdw}/bin/postgres --single -D /data postgres
           fi
           ${postgresqlWithDynamodb_fdw}/bin/postgres -D /data
         '';
@@ -127,7 +130,7 @@
         pythonWithDynamodb_fdw = pythonWithDynamodb_fdw;
 
         # "Test":
-        #   nix build .#docker && podman load -i result -q && podman run --rm -it -p 127.0.0.1:5432:5432 --name dynamodb_fdw -v $HOME/.aws:/home/postgres/.aws ghcr.io/mfenniak/dynamodb_fdw:9.9
+        #   nix build .#docker && podman load -i result -q && podman run --rm -it -p 127.0.0.1:5432:5432 --name dynamodb_fdw -v $HOME/.aws:/home/postgres/.aws ghcr.io/mfenniak/dynamodb_fdw:000000000000000000
         docker = pkgs.dockerTools.buildLayeredImage {
           name = "ghcr.io/mfenniak/dynamodb_fdw";
           tag = fdwVersion;
