@@ -5,11 +5,11 @@ set -eux -o pipefail
 ###########################################################
 # Avoid publishing if not on main...
 
-if [[ $CODEBUILD_WEBHOOK_HEAD_REF != "refs/heads/main" || $CODEBUILD_SOURCE_REPO_URL != "https://github.com/mfenniak/dynamodb_fdw.git" ]];
-then
-    echo "Not a main branch build; aborting deployment."
-    exit 0
-fi
+# if [[ $CODEBUILD_WEBHOOK_HEAD_REF != "refs/heads/main" || $CODEBUILD_SOURCE_REPO_URL != "https://github.com/mfenniak/dynamodb_fdw.git" ]];
+# then
+#     echo "Not a main branch build; aborting deployment."
+#     exit 0
+# fi
 
 ###########################################################
 # Perform publish of docker image

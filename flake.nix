@@ -129,7 +129,6 @@
         docker = pkgs.dockerTools.buildLayeredImage {
           name = "ghcr.io/mfenniak/dynamodb_fdw";
           tag = fdwVersion;
-          maxLayers = 5;
 
           contents = [
             pkgs.bash
