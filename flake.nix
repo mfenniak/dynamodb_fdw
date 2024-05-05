@@ -36,6 +36,18 @@
         '';
       };
 
+      devShells.codebuild =
+        pkgs.mkShell {
+          buildInputs = [ ];
+          packages = [
+            pkgs.awscli2
+            pkgs.curl
+            pkgs.docker
+            pkgs.gnused
+            pkgs.jq
+          ];
+        };
+
       packages = let
         fdwVersion = "9.9";
         fdwPackage = python: python.pkgs.buildPythonPackage rec {
@@ -69,9 +81,9 @@
 
         # Write an init script for the docker container that will check /data for a postgresql.conf file; if not
         # present, it will run initdb; and then it will startup PostgreSQL.
-        initScript = ''
+        postgresInitScript = ''
           #!${pkgs.runtimeShell}
-          set -e
+          set -eu -o pipefail
           if [ ! -f /data/postgresql.conf ]; then
             # Note: the default encoding of SQL_ASCII is not an encoding that Python recognizes; this can cause
             # PyString_AsString in Multicorn to fail as it attempts to take the encoding of the database and convert it to
@@ -92,10 +104,23 @@
           fi
           ${postgresqlWithDynamodb_fdw}/bin/postgres -D /data
         '';
+        postgresInitScriptPackage = pkgs.writeScriptBin "postgresInitScript" postgresInitScript;
 
-        # Package the initScript into a simple derivation with an executable version of the script.
+        # It's been a bit of a pain to get the postgres user created during container creation... so let's just do it
+        # in an init script that is run as root when the container starts up.  It creates the user and group, and then
+        # creates the data dir, chowns it, and then runs the postgresInitScript as the postgres user.
+        rootInitScript = ''
+          #!${pkgs.runtimeShell}
+          set -eu -o pipefail
+          ${pkgs.dockerTools.shadowSetup}
+          groupadd --system -g 999 postgres
+          useradd --system --no-create-home -u 999 -g 999 postgres
+          mkdir -p /data
+          chown -R postgres:postgres /data
+          ${pkgs.su}/bin/su postgres -c "${postgresInitScriptPackage}/bin/postgresInitScript"
+        '';
+        rootInitScriptPackage = pkgs.writeScriptBin "rootInitScript" rootInitScript;
 
-        initScriptPackage = pkgs.writeScriptBin "initScript" initScript;
       in {
         # "Test":
         #   nix build .#pythonWithDynamodb_fdw && ./result/bin/python -c "from dynamodbfdw import dynamodbfdw; dynamodbfdw.DynamoFdw"
@@ -106,7 +131,6 @@
         docker = pkgs.dockerTools.buildLayeredImage {
           name = "ghcr.io/mfenniak/dynamodb_fdw";
           tag = fdwVersion;
-          maxLayers = 5;
 
           contents = [
             pkgs.bash
@@ -120,25 +144,9 @@
             # pkgs.gnugrep
           ];
 
-          extraCommands = ''
-            #!${pkgs.runtimeShell}
-            mkdir -p data
-          '';
-
-          fakeRootCommands = ''
-            #!${pkgs.runtimeShell}
-            set -e
-            ${pkgs.dockerTools.shadowSetup}
-            groupadd --system -g 999 postgres
-            useradd --system --no-create-home -u 999 -g 999 postgres
-            chown -R postgres:postgres data
-          '';
-          enableFakechroot = true;
-
           config = {
-            User = "postgres";
             Cmd = [
-              "${initScriptPackage}/bin/initScript"
+              "${rootInitScriptPackage}/bin/rootInitScript"
             ];
           };
         };
