@@ -23,14 +23,17 @@
           env.NIX_CFLAGS_COMPILE = "-O0 -g";
           dontStrip = true;
         }); # If debug symbols are needed.
+      devPython = (python.withPackages (python-pkgs: [
+        python-pkgs.boto3
+        python-pkgs.simplejson
+        python-pkgs.pytest
+        python-pkgs.psycopg2
+        (mfenniak.packages.${system}.multicorn2Python postgresql python)
+      ]));
     in {
       devShells.default = pkgs.mkShell {
         buildInputs = [
-          (python.withPackages (python-pkgs: [
-            python-pkgs.boto3
-            python-pkgs.simplejson
-            (mfenniak.packages.${system}.multicorn2Python postgresql python)
-          ]))
+          devPython
           (postgresql.withPackages (p: [
             multicorn2
           ]))
@@ -52,6 +55,7 @@
             pkgs.docker
             pkgs.gnused
             pkgs.jq
+            devPython
           ];
         };
 
