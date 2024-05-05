@@ -15,7 +15,7 @@
   outputs = { self, nixpkgs, flake-utils, mfenniak }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      postgresql = pkgs.postgresql;
+      postgresql = pkgs.postgresql;  # .overrideAttrs (oldAttrs: { dontStrip = true; });  If debug symbols are needed.
       python = pkgs.python3;
     in {
       devShells.default = pkgs.mkShell {
@@ -44,7 +44,7 @@
 
           src = [
             ./setup.py
-            ./dynamodb_fdw
+            ./dynamodbfdw
           ];
           unpackPhase = ''
             for srcFile in $src; do
@@ -52,15 +52,19 @@
               cp -r $srcFile $(stripHash $srcFile)
             done
           '';
+          doCheck = false;
         };
         pythonWithDynamodb_fdw = python.withPackages (python-pkgs: [
           python-pkgs.boto3
           python-pkgs.simplejson
           (mfenniak.packages.${system}.multicorn2Python postgresql python)
-          fdwPackage
+          (fdwPackage python)
         ]);
         postgresqlWithDynamodb_fdw = postgresql.withPackages (p: [
-          (mfenniak.packages.${system}.multicorn2 postgresql python)
+          (
+            (mfenniak.packages.${system}.multicorn2 postgresql python)
+            # .overrideAttrs (oldAttrs: { dontStrip = true; })   If debug symbols are needed.
+          )
         ]);
 
         # Write an init script for the docker container that will check /data for a postgresql.conf file; if not
@@ -69,7 +73,15 @@
           #!${pkgs.runtimeShell}
           set -e
           if [ ! -f /data/postgresql.conf ]; then
-            ${postgresqlWithDynamodb_fdw}/bin/initdb -D /data
+            # Note: the default encoding of SQL_ASCII is not an encoding that Python recognizes; this can cause
+            # PyString_AsString in Multicorn to fail as it attempts to take the encoding of the database and convert it to
+            # a string; SQL_ASCII is not a valid encoding for this purpose; all error handling in Multicorn uses this
+            # function; so all errors from Multicorn will fail with a segfault as they infinitely recurse through the
+            # error handling code.  Workaround: set the encoding to UTF8.
+            # Multicorn seems to try to avoid this... https://github.com/pgsql-io/multicorn2/blob/19d9ef571baa21833d75e4d587807bca19de5efe/src/python.c#L104-L114
+            # but this function isn't used in PyString_AsString... https://github.com/pgsql-io/multicorn2/blob/19d9ef571baa21833d75e4d587807bca19de5efe/src/python.c#L172
+            # Should probably be reported upstream...
+            ${postgresqlWithDynamodb_fdw}/bin/initdb -E UTF8 -D /data
             ${pkgs.gnused}/bin/sed -i "s/#unix_socket_directories = '\/run\/postgresql'/unix_socket_directories = '''/" /data/postgresql.conf
             ${pkgs.gnused}/bin/sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /data/postgresql.conf
             echo ""
@@ -90,7 +102,7 @@
         pythonWithDynamodb_fdw = pythonWithDynamodb_fdw;
 
         # "Test":
-        #   nix build .#docker && podman load -i result -q && podman run --rm -it -p 5432:5432 -v $HOME/.aws:/home/postgres/.aws ghcr.io/mfenniak/dynamodb_fdw:9.9
+        #   nix build .#docker && podman load -i result -q && podman run --rm -it -p 127.0.0.1:5432:5432 --name dynamodb_fdw -v $HOME/.aws:/home/postgres/.aws ghcr.io/mfenniak/dynamodb_fdw:9.9
         docker = pkgs.dockerTools.buildLayeredImage {
           name = "ghcr.io/mfenniak/dynamodb_fdw";
           tag = fdwVersion;
@@ -101,6 +113,11 @@
             pkgs.coreutils
             pythonWithDynamodb_fdw
             postgresqlWithDynamodb_fdw
+            # If debug tooling is needed:
+            # pkgs.gdb
+            # pkgs.procps
+            # pkgs.findutils
+            # pkgs.gnugrep
           ];
 
           extraCommands = ''
@@ -128,3 +145,22 @@
       };
     });
 }
+
+# To remotely debug the container with gdb:
+#
+# Review all the debug tooling commented out things above, like debug symbols and gdb, and uncomment them.
+#
+# (Run postgres in one terminal)
+# nix build .#docker && podman load -i result -q && podman run --rm -it -p 127.0.0.1:5432:5432 -p 127.0.0.1:9999:9999 --name dynamodb_fdw -v $HOME/.aws:/home/postgres/.aws ghcr.io/mfenniak/dynamodb_fdw:9.9
+#
+# (in another terminal, run gdbserver)
+# podman exec -it dynamodb_fdw /bin/bash
+# (ps to search for connection)
+# gdbserver :9999 --attach 21
+#
+# (in another terminal, attach gdb)
+# gdb -q
+# target remote localhost:9999
+# cont
+#
+# Then in yet another terminal, do whatever you need to do to trigger the segfault.
