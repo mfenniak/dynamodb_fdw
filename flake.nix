@@ -40,9 +40,11 @@
         pkgs.mkShell {
           buildInputs = [ ];
           packages = [
-            pkgs.gnused
-            pkgs.docker
+            pkgs.awscli2
             pkgs.curl
+            pkgs.docker
+            pkgs.gnused
+            pkgs.jq
           ];
         };
 
