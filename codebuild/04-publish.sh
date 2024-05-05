@@ -31,7 +31,7 @@ set -x
 export vtag=ghcr.io/mfenniak/dynamodb_fdw:$CODEBUILD_BUILD_NUMBER
 export ltag=ghcr.io/mfenniak/dynamodb_fdw:latest
 
-# `result` should be the built container from 04-build.sh
+# `result` should be the built container from 02-build.sh
 docker load < result
 
 # ensure latest & versioned tag are applied to the image

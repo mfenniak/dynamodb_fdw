@@ -7,4 +7,5 @@ phases:
       - nix develop .#codebuild --command bash ./codebuild/01-prepare-build.sh
       # can't run `nix build` commands within the nix develop, or will get EACCES errors on /tmp
       - ./codebuild/02-build.sh
-      - nix develop .#codebuild --command bash ./codebuild/03-publish.sh
+      - nix develop .#codebuild --command bash ./codebuild/03-test.sh
+      - nix develop .#codebuild --command bash ./codebuild/04-publish.sh
