@@ -49,7 +49,7 @@
         };
 
       packages = let
-        fdwVersion = "9.9";
+        fdwVersion = "000000000000000000";
         fdwPackage = python: python.pkgs.buildPythonPackage rec {
           pname = "dynamodb_fdw";
           version = fdwVersion;
