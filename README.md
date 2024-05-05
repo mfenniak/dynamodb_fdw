@@ -28,15 +28,14 @@ To make it super easy, dynamodb_fdw comes in a Docker container with the softwar
 
 ```
 docker run -d \
-    -p 5432:5432 \
-    -e POSTGRES_PASSWORD=a-postgres-password \
-    -v $HOME/.aws:/var/lib/postgresql/.aws \
-    mfenniak/dynamodb_fdw:latest
+    -p 127.0.0.1:5432:5432 \
+    -v $HOME/.aws:/home/postgres/.aws \
+    ghcr.io/mfenniak/dynamodb_fdw:latest
 ```
 
-Here you're providing the AWS access keys that will be used to access AWS, and a password that you can use to connect to Postgres.  AWS credentials in this example were provided by sharing `$HOME/.aws` into the container, but can also be provided by any boto3 supported mechanism (eg. environment variables, instance profile metadata).  Any other options supported by the [docker standard PostgreSQL image](https://hub.docker.com/_/postgres) can also be used to customize the PostgreSQL server.
+Here you're providing the AWS access keys that will be used to access AWS.  AWS credentials in this example were provided by sharing `$HOME/.aws` into the container, but can also be provided by any boto3 supported mechanism (eg. environment variables, instance profile metadata).
 
-Once running, you can use any PostgreSQL client to access the DB and start running SQL.
+Once running, you can use any PostgreSQL client to access the DB as the **postgres** user on the database **postgres**.  The database is set-up with **trust** authentication so no password is required; in this configuration this tool is only recommended for local access, which is why the example run command only binds to localhost.  (Note: No other configuration is currently supported by the docker container, but patches are welcome!)
 
 Next you have to create one PostgreSQL table for every remote DynamoDB table that you want to interact with.  You can do this very quickly by using the [IMPORT FOREIGN SCHEMA](https://www.postgresql.org/docs/12/sql-importforeignschema.html) functionality.  In the below example, the PG schema ddb_usw2 is created, and all DynamoDB tables in the us-west-2 region are imported into that schema:
 
