@@ -12,6 +12,20 @@ set -eux -o pipefail
 # fi
 
 ###########################################################
+# Retrieve secrets required for interaction with services
+
+set +x # disable shell command logging temporarily to avoid logging...
+GITHUB_PAT=$(aws ssm get-parameter --name /mfenniak/yycpathways/github-personal-access-token --with-decryption | jq -r '.Parameter.Value')
+set -x
+
+###########################################################
+# Auth for github package registry
+
+set +x # disable shell command logging temporarily to avoid logging...
+echo $GITHUB_PAT | docker login ghcr.io -u mfenniak --password-stdin
+set -x
+
+###########################################################
 # Perform publish of docker image
 
 export vtag=ghcr.io/mfenniak/dynamodb_fdw:$CODEBUILD_BUILD_NUMBER
@@ -31,6 +45,5 @@ docker push $ltag
 set +x # stop cmd logging for PAT security
 curl -v -X POST -H "Content-Type:application/json" \
     --data "{\"tag_name\":\"$VERSION\",\"name\":\"$VERSION\",\"target_commitish\":\"$CODEBUILD_RESOLVED_SOURCE_VERSION\" }" \
-    -u $GITHUB_USER:$GITHUB_TOKEN \
-    https://api.github.com/repos/mfenniak/dynamodb_fdw/releases
+    https://mfenniak:$GITHUB_PAT@api.github.com/repos/mfenniak/dynamodb_fdw/releases
 set -x
