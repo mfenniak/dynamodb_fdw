@@ -1,7 +1,8 @@
+from botocore.config import Config
 import boto3
+import os
 import pytest
 import time
-from botocore.config import Config
 
 aws_region = 'us-east-1'
 
@@ -78,7 +79,8 @@ def string_string_table(dynamodb_resource, dynamodb_client):
 @pytest.fixture
 def pg_connection():
     import psycopg2
-    conn = psycopg2.connect("host=localhost port=5432 dbname=postgres user=postgres password=password")
+    host = os.getenv('FDW_IP', 'localhost')
+    conn = psycopg2.connect(f"host={host} port=5432 dbname=postgres user=postgres password=password")
     yield conn
     conn.close()
 
