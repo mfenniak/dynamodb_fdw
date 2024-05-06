@@ -43,7 +43,7 @@ docker push $ltag
 # Create GitHub release tag
 
 set +x # stop cmd logging for PAT security
-curl -v -X POST -H "Content-Type:application/json" \
+curl -X POST -H "Content-Type:application/json" \
     --data "{\"tag_name\":\"$VERSION\",\"name\":\"$VERSION\",\"target_commitish\":\"$CODEBUILD_RESOLVED_SOURCE_VERSION\" }" \
     https://mfenniak:$GITHUB_PAT@api.github.com/repos/mfenniak/dynamodb_fdw/releases
 set -x
