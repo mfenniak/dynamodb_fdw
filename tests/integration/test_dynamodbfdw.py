@@ -1,14 +1,12 @@
 from botocore.config import Config
+from psycopg2 import sql
 import boto3
+import json
 import os
 import pytest
 import time
 
 aws_region = 'us-east-1'
-
-@pytest.fixture(scope='session')
-def boto_config():
-    return Config(region_name=aws_region)
 
 @pytest.fixture(scope='session')
 def dynamodb_resource():
@@ -85,7 +83,14 @@ def pg_connection():
     conn.close()
 
 @pytest.fixture
-def import_schema(pg_connection, string_table, string_string_table):
+def multicorn_dynamo(pg_connection):
+    with pg_connection.cursor() as cur:
+        cur.execute("DROP SERVER IF EXISTS multicorn_dynamo CASCADE")
+        cur.execute("CREATE EXTENSION IF NOT EXISTS multicorn")
+        cur.execute("CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn options ( wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw' )")
+
+@pytest.fixture
+def import_schema(pg_connection, multicorn_dynamo, string_table, string_string_table):
     with pg_connection.cursor() as cur:
         cur.execute("DROP SCHEMA IF EXISTS dynamodbfdw_import_test CASCADE")
         cur.execute("CREATE SCHEMA dynamodbfdw_import_test")
@@ -109,10 +114,113 @@ def test_import_schema(pg_connection, import_schema, string_table, string_string
         res = cur.fetchone()
         assert res == (string_string_table, 'FOREIGN')
 
-def test_read_table(pg_connection, import_schema, string_table, string_string_table):
-    from psycopg2 import sql
+def test_blind_data_read(pg_connection, import_schema, string_table, string_string_table):
+    # Doesn't check any data quality, but serves as a good baseline for whether literally anything is working
     with pg_connection.cursor() as cur:
         cur.execute(sql.SQL('SELECT * FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
-        cur.fetchall()
+        assert cur.fetchall() == []
         cur.execute(sql.SQL('SELECT * FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_string_table)))
-        cur.fetchall()
+        assert cur.fetchall() == []
+
+@pytest.fixture
+def string_table_data(pg_connection, string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, document) VALUES (%s, %s)').format(sql.Identifier(string_table)),
+            ['pkey-value-1', json.dumps({'doc-attr-1': 'doc-value-1'})]
+        )
+        pg_connection.commit()
+    yield
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
+        pg_connection.commit()
+
+def test_hash_table_data_read(pg_connection, import_schema, string_table, string_table_data):
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('SELECT oid, pkey, document FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
+        data = cur.fetchall()
+        assert data == [('{"pkey": "pkey-value-1"}', 'pkey-value-1', {'pkey': 'pkey-value-1', 'doc-attr-1': 'doc-value-1'})]
+
+def assert_contains_rows(output, required_rows):
+    """
+    Check if the provided output contains all required rows.
+    This allows for the presence of additional rows and does not require exact order.
+
+    :param output: The list of tuples representing the output from the query.
+    :param required_rows: A list of strings that are critical to appear in the output.
+    """
+    output_text = "\n".join([row[0] for row in output])  # Convert tuple output to a single string for easier searching
+    missing_rows = [row for row in required_rows if row not in output_text]
+    assert not missing_rows, f"Missing required rows in output: {missing_rows}"
+
+def test_explain_pkey_equal(pg_connection, import_schema, string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('EXPLAIN SELECT * FROM dynamodbfdw_import_test.{} WHERE pkey = %s').format(sql.Identifier(string_table)),
+            ['pkey-value-1']
+        )
+        query_plan = cur.fetchall()
+        # It's possible that micro adjustments in this query plan will happen w/ new versions of Postgres or Multicorn,
+        # so comments point out the things that are important about the test... should probably be extracted into some
+        # kind of test help that just checks specific row presence?
+        required_query_plan_rows = [
+            "Foreign Scan on \"dynamodbfdw-string-pkey\"",
+            "Filter: (pkey = 'pkey-value-1'::text)",
+            "Multicorn: DynamoDB: pagination provider",
+            # "Query table", rather than "Scan table", means that we're doing a DynamoDB Query operation.  That's what
+            # we expect here because we're doing an exact pkey search, and is more efficient than a Scan.
+            "Multicorn:   DynamoDB: Query table dynamodbfdw-string-pkey from us-east-1",
+            "Multicorn:           \"AttributeValueList\": [",
+            # Should have both pkey & skey being sent in the KeyConditions.
+            "Multicorn:             \"pkey-value-1\"",
+            "Multicorn:           \"ComparisonOperator\": \"EQ\"",
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
+
+@pytest.fixture
+def string_string_table_data(pg_connection, string_string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, skey, document) VALUES (%s, %s, %s)').format(sql.Identifier(string_string_table)),
+            ['pkey-value-1', 'skey-value-1', json.dumps({'doc-attr-1': 'doc-value-1'})]
+        )
+        pg_connection.commit()
+    yield
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_string_table)))
+        pg_connection.commit()
+
+def test_sort_table_data_read(pg_connection, import_schema, string_string_table, string_string_table_data):
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('SELECT oid, pkey, skey, document FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_string_table)))
+        data = cur.fetchall()
+        assert data == [(
+            '{"pkey": "pkey-value-1", "skey": "skey-value-1"}',
+            'pkey-value-1',
+            'skey-value-1',
+            {'pkey': 'pkey-value-1', 'skey': 'skey-value-1', 'doc-attr-1': 'doc-value-1'}
+        )]
+
+def test_explain_pkey_equal(pg_connection, import_schema, string_string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('EXPLAIN SELECT * FROM dynamodbfdw_import_test.{} WHERE pkey = %s AND skey = %s').format(sql.Identifier(string_string_table)),
+            ['pkey-value-1', 'skey-value-1']
+        )
+        query_plan = cur.fetchall()
+        # It's possible that micro adjustments in this query plan will happen w/ new versions of Postgres or Multicorn,
+        # so we try to be a bit flexible and just pick out the important bits we want to test for.
+        required_query_plan_rows = [
+            "Foreign Scan on \"dynamodbfdw-string-pkey-string-skey\"",
+            "Filter: ((pkey = 'pkey-value-1'::text) AND (skey = 'skey-value-1'::text))",
+            "Multicorn: DynamoDB: pagination provider",
+            # "Query table", rather than "Scan table", means that we're doing a DynamoDB Query operation.  That's what
+            # we expect here because we're doing an exact pkey search, and is more efficient than a Scan.
+            "Multicorn:   DynamoDB: Query table dynamodbfdw-string-pkey-string-skey from us-east-1",
+            "Multicorn:           \"AttributeValueList\": [",
+            # Should have both pkey & skey being sent in the KeyConditions.
+            "Multicorn:             \"pkey-value-1\"",
+            "Multicorn:             \"skey-value-1\"",
+            "Multicorn:           \"ComparisonOperator\": \"EQ\"",
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
