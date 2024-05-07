@@ -16,7 +16,7 @@
     flake-utils.lib.eachDefaultSystem (system: let
       debugBuild = false;
       pkgs = nixpkgs.legacyPackages.${system};
-      postgresql = pkgs.postgresql.overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild { dontStrip = true; }); # If debug symbols are needed.
+      postgresql = pkgs.postgresql_16.overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild { dontStrip = true; }); # If debug symbols are needed.
       python = pkgs.python3;
       multicorn2 = (mfenniak.packages.${system}.multicorn2 postgresql python)
         .overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild {
@@ -101,9 +101,12 @@
             # Multicorn seems to try to avoid this... https://github.com/pgsql-io/multicorn2/blob/19d9ef571baa21833d75e4d587807bca19de5efe/src/python.c#L104-L114
             # but this function isn't used in PyString_AsString... https://github.com/pgsql-io/multicorn2/blob/19d9ef571baa21833d75e4d587807bca19de5efe/src/python.c#L172
             # Should probably be reported upstream...
-            ${postgresqlWithDynamodb_fdw}/bin/initdb -E UTF8 -D /data
-            ${pkgs.gnused}/bin/sed -i "s/#unix_socket_directories = '\/run\/postgresql'/unix_socket_directories = '''/" /data/postgresql.conf
-            ${pkgs.gnused}/bin/sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /data/postgresql.conf
+            ${postgresqlWithDynamodb_fdw}/bin/initdb \
+              -E UTF8 \
+              --set unix_socket_directories="" \
+              --set listen_addresses="*" \
+              --auth-host=trust \
+              -D /data
             echo ""
             echo "*** Warning: PostgreSQL has been initialized to allow access without a password. ***"
             echo "*** This is insecure and should only be used for development purposes. ***"

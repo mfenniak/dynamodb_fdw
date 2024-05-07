@@ -29,11 +29,11 @@
       },
       "locked": {
         "dir": "flake",
-        "lastModified": 1715000677,
-        "narHash": "sha256-JmN7WhWiGY431R5zlvkVVifgxwzISjM+3xirR+Ju3pI=",
+        "lastModified": 1715043664,
+        "narHash": "sha256-I7r6EUxbLuaUOiAEJ2MKsURc0Sy/et+vph1BktXjbiQ=",
         "owner": "mfenniak",
         "repo": "custom-nixpkgs",
-        "rev": "8f0ea2e0631509e834117108763348b02d0e024a",
+        "rev": "4fb536a6b0c8b3d48eebe805a68c6bb7ecdf08d4",
         "type": "github"
       },
       "original": {
