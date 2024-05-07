@@ -107,13 +107,10 @@
               --set listen_addresses="*" \
               --auth-host=trust \
               -D /data
-            ${pkgs.gnused}/bin/sed -i "s/#unix_socket_directories = '\/run\/postgresql'/unix_socket_directories = '''/" /data/postgresql.conf
-            ${pkgs.gnused}/bin/sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /data/postgresql.conf
             echo ""
             echo "*** Warning: PostgreSQL has been initialized to allow access without a password. ***"
             echo "*** This is insecure and should only be used for development purposes. ***"
             echo ""
-            echo "host all all all trust" >> /data/pg_hba.conf
             # Init multicorn and the multicorn_dynamo server.
             echo "CREATE EXTENSION multicorn; CREATE SERVER multicorn_dynamo FOREIGN DATA WRAPPER multicorn options ( wrapper 'dynamodbfdw.dynamodbfdw.DynamoFdw' )" \
               | ${postgresqlWithDynamodb_fdw}/bin/postgres --single -D /data postgres
