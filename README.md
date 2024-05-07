@@ -273,10 +273,13 @@ dynamodb_fdw could be a bit more still, I think.  Here are some areas that it co
 If you want to develop on dynamodb_fdw, you can use the devshell provided by `flake.nix`, and the [nix-direnv](https://github.com/nix-community/nix-direnv) tool.  This will automatically set up a PostgreSQL system with Multicorn2 available, a Python with Multicorn2 available, and configure PYTHONPATH so that the current working directory is included for development purposes.  Once you're up and running in a nix-direnv shell, you'll need to start a PostgreSQL server:
 
 ```
-initdb -D ./tmp
+initdb \
+    -E UTF8 \
+    --set unix_socket_directories="" \
+    --set log_min_messages="debug" \
+    --auth-host=trust \
+    -D ./tmp
 ```
-
-If you're using NixOS, you'll find that PostgreSQL will fail to startup due to the `unix_socket_directories` default setting.  Edit tmp/postgresql.conf and change `unix_socket_directories = ''` to remove the default `/run/postgresql` directory, allowing only TCP connections.  If you're not using NixOS, you can ignore this step.
 
 Then start the PostgreSQL server:
 
@@ -284,7 +287,7 @@ Then start the PostgreSQL server:
 postgres -D ./tmp
 ```
 
-You can then connect to the running PostgreSQL instance and run commands to set-up, use, and test the dynamodb_fdw module.  Here's an example of setting up the module and querying a table:
+You can then connect to the running PostgreSQL instance and run commands to set-up, use, and test the dynamodb_fdw module, or, run the dynamodb_fdw integration tests.  Here's an example of setting up the module and querying a table:
 
 ```
 $ psql -h localhost postgres $(whoami)
