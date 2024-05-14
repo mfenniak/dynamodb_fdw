@@ -14,12 +14,25 @@ def map_python_types_to_dynamodb(value):
     Recursively convert all bytes objects to boto3's Binary wrapper in the given dictionary.
     """
     if isinstance(value, bytes):
-        raise Exception("debug output -- successfully hit bytes type -- converting %r to Binary") # FIXME: Remove
+        # raise Exception("debug output -- successfully hit bytes type -- converting %r to Binary") # FIXME: Remove
         return Binary(value)
     elif isinstance(value, dict):
         return {k: map_python_types_to_dynamodb(v) for k, v in value.items()}
     elif isinstance(value, list):
         return [map_python_types_to_dynamodb(v) for v in value]
+    else:
+        return value
+
+def map_dynamodb_types_to_python(value):
+    """
+    Recursively convert all Binary objects to bytes in the given dictionary.
+    """
+    if isinstance(value, Binary):
+        return value.value
+    elif isinstance(value, dict):
+        return {k: map_dynamodb_types_to_python(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [map_dynamodb_types_to_python(v) for v in value]
     else:
         return value
 
@@ -37,6 +50,8 @@ class MyJsonEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, set):
             return list(o)
+        elif isinstance(o, Binary):
+            return o.value
         return super().default(o)
 
 not_found_sentinel = object()
@@ -739,10 +754,15 @@ class DynamoFdw(ForeignDataWrapper):
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
 
                 # populate all other mapped attributes
+                # FIXME: does this also replace all the LSI & GSI logic above?  Maybe, but needs testing.
+                # FIXME: ideally should just fetch the values from the 'columns' requested in execute...
                 for column_name, column in self.columns.items():
                     mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
                     if mapped_attr is not not_found_sentinel:
-                        pg_row[column_name] = ddb_row.get(mapped_attr)
+                        ddb_value = ddb_row.get(mapped_attr, not_found_sentinel)
+                        if ddb_value is not not_found_sentinel:
+                            log_to_postgres("execute fetch colmn %r w/ ddb key %r and value %r" % (column_name, mapped_attr, ddb_value), WARNING)
+                            pg_row[column_name] = map_dynamodb_types_to_python(ddb_value)
 
                 yield pg_row
         finally:
@@ -768,6 +788,7 @@ class DynamoFdw(ForeignDataWrapper):
         # called once for each value to be inserted, where the value is the structure of the dynamodb FDW table; eg.
         # {'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
         log_to_postgres("insert row: %r" % (value,), DEBUG)
+        # raise Exception('insert(%r)' % (value))
         put_item = {}
 
         # Add the document field to the put_item
@@ -796,7 +817,7 @@ class DynamoFdw(ForeignDataWrapper):
                     put_item[gsi.sort_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_skey_value)
 
         # Add other fields marked with mapped_attr
-         # FIXME: it seems kinda redundant to do the above GSI and LSI mappings since they will all be marked with
+        # FIXME: it seems kinda redundant to do the above GSI and LSI mappings since they will all be marked with
         # `mapped_attr` as well -- does this replace both of those code paths?  Maybe, but needs testing.
         for column_name, column in self.columns.items():
             mapped_attr = column.options.get('mapped_attr', not_found_sentinel)

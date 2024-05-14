@@ -235,7 +235,7 @@ def custom_import_schema(pg_connection, multicorn_dynamo, string_table):
                 oid TEXT,
                 pkey TEXT OPTIONS (mapped_attr 'pkey', partition_key 'true'),
                 test_text_field TEXT OPTIONS (mapped_attr 'test_attr'),
-                test_bytea_field TEXT OPTIONS (mapped_attr 'test_binary_attr'),
+                test_bytea_field BYTEA OPTIONS (mapped_attr 'test_binary_attr'),
                 document JSON OPTIONS (ddb_document 'true')
             ) SERVER multicorn_dynamo OPTIONS (
                 aws_region '{aws_region}',
@@ -247,8 +247,8 @@ def custom_import_schema(pg_connection, multicorn_dynamo, string_table):
 def string_table_custom_schema_data(pg_connection, string_table):
     with pg_connection.cursor() as cur:
         cur.execute(
-            sql.SQL("INSERT INTO dynamodbfdw_manual_test.{} (pkey, test_text_field, test_bytea_field, document) VALUES (%s, %s, '\\x00010203'::bytea, %s)").format(sql.Identifier(string_table)),
-            ['pkey-value-1', 'test custom field with mapped_attr', json.dumps({'doc-attr-1': 'doc-value-1'})]
+            sql.SQL("INSERT INTO dynamodbfdw_manual_test.{} (pkey, test_text_field, test_bytea_field, document) VALUES (%s, %s, %s, %s)").format(sql.Identifier(string_table)),
+            ['pkey-value-1', 'test custom field with mapped_attr', b'\x00\x01\x02\x03', json.dumps({'doc-attr-1': 'doc-value-1'})]
         )
         pg_connection.commit()
     yield
