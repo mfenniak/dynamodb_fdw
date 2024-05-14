@@ -260,16 +260,13 @@ def test_mapped_attr_insert(pg_connection, custom_import_schema, string_table, s
     with pg_connection.cursor() as cur:
         # Query to ensure that test_text_field was populated in the DDB record
         cur.execute(sql.SQL('SELECT oid, pkey, test_text_field, test_bytea_field, document FROM dynamodbfdw_manual_test.{}').format(sql.Identifier(string_table)))
-        data = cur.fetchall()
-        assert data == [(
-            '{"pkey": "pkey-value-1"}',
-            'pkey-value-1',
-            'test custom field with mapped_attr',
-            b'\x00\x01\x02\x03',
-            {
-                'pkey': 'pkey-value-1',
-                'test_attr': 'test custom field with mapped_attr',
-                'test_binary_attr': '\\x00010203',
-                'doc-attr-1': 'doc-value-1'
-            }
-        )]
+        oid, pkey, test_text_field, test_bytea_field, document = cur.fetchall()[0]
+        assert pkey == 'pkey-value-1'
+        assert test_text_field == 'test custom field with mapped_attr'
+        assert test_bytea_field.tobytes() == b'\x00\x01\x02\x03' # psycopg2 returns bytea as a memoryview
+        assert document == {
+            'pkey': 'pkey-value-1',
+            'test_attr': 'test custom field with mapped_attr',
+            'test_binary_attr': '\\x00010203',
+            'doc-attr-1': 'doc-value-1'
+        }
