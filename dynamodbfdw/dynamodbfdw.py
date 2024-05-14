@@ -14,7 +14,7 @@ def map_python_types_to_dynamodb(value):
     Recursively convert all bytes objects to boto3's Binary wrapper in the given dictionary.
     """
     if isinstance(value, bytes):
-        raise Exception("converting %r to Binary")
+        raise Exception("debug output -- successfully hit bytes type -- converting %r to Binary") # FIXME: Remove
         return Binary(value)
     elif isinstance(value, dict):
         return {k: map_python_types_to_dynamodb(v) for k, v in value.items()}
