@@ -7,6 +7,33 @@ from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
 import boto3
 import simplejson as json
+from boto3.dynamodb.types import Binary
+
+def map_python_types_to_dynamodb(value):
+    """
+    Recursively convert all bytes objects to boto3's Binary wrapper in the given dictionary.
+    """
+    if isinstance(value, bytes):
+        return Binary(value)
+    elif isinstance(value, dict):
+        return {k: map_python_types_to_dynamodb(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [map_python_types_to_dynamodb(v) for v in value]
+    else:
+        return value
+
+def map_dynamodb_types_to_python(value):
+    """
+    Recursively convert all Binary objects to bytes in the given dictionary.
+    """
+    if isinstance(value, Binary):
+        return value.value
+    elif isinstance(value, dict):
+        return {k: map_dynamodb_types_to_python(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [map_dynamodb_types_to_python(v) for v in value]
+    else:
+        return value
 
 def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
@@ -22,6 +49,9 @@ class MyJsonEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, set):
             return list(o)
+        elif isinstance(o, Binary):
+            # format bytes into json doc as "\x00"...
+            return "\\x" + o.value.hex()
         return super().default(o)
 
 not_found_sentinel = object()
@@ -699,12 +729,12 @@ class DynamoFdw(ForeignDataWrapper):
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
-        log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
         row_provider = self.plan_query(quals)
         table = get_table(self.aws_region, self.table_name)
 
         try:
+            # FIXME: pass `columns` into get_rows and use them as a projection to only retrieve the columns requested
             for ddb_row in row_provider.get_rows(table):
                 pg_row = {}
                 pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
@@ -712,6 +742,7 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
                 # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
                 pg_row['oid'] = json.dumps(pg_row)
+
                 # populate any secondary-index columns for PG-based filtering and consistency/display
                 for lsi in self.local_secondary_indexes:
                     pg_row[lsi.pg_field_name] = ddb_row.get(lsi.ddb_field_name)
@@ -719,7 +750,23 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[gsi.partition_key.pg_field_name] = ddb_row.get(gsi.partition_key.ddb_field_name)
                     if gsi.sort_key is not not_found_sentinel:
                         pg_row[gsi.sort_key.pg_field_name] = ddb_row.get(gsi.sort_key.ddb_field_name)
+
+                # populate the document field
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
+
+                # populate any other mapped attributes
+                # FIXME: does this also replace all the LSI & GSI logic above, since they also have mapped_attr on them?
+                # Maybe, but needs testing... integration tests don't cover these cases yet so I have no confidence in
+                # it.
+                for column_name, column in self.columns.items():
+                    if column_name not in columns:
+                        continue
+                    mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
+                    if mapped_attr is not not_found_sentinel:
+                        ddb_value = ddb_row.get(mapped_attr, not_found_sentinel)
+                        if ddb_value is not not_found_sentinel:
+                            pg_row[column_name] = map_dynamodb_types_to_python(ddb_value)
+
                 yield pg_row
         finally:
             # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
@@ -745,22 +792,43 @@ class DynamoFdw(ForeignDataWrapper):
         # {'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
         log_to_postgres("insert row: %r" % (value,), DEBUG)
         put_item = {}
-        put_item.update(json.loads(value[self.document_field.pg_field_name]))
-        put_item[self.partition_key.ddb_field_name] = value[self.partition_key.pg_field_name]
+
+        # Add the document field to the put_item
+        document_data = json.loads(value[self.document_field.pg_field_name])
+        put_item.update(map_python_types_to_dynamodb(document_data))
+
+        # Add the partition key and sort key
+        put_item[self.partition_key.ddb_field_name] = map_python_types_to_dynamodb(value[self.partition_key.pg_field_name])
         if self.sort_key is not not_found_sentinel:
-            put_item[self.sort_key.ddb_field_name] = value[self.sort_key.pg_field_name]
+            put_item[self.sort_key.ddb_field_name] = map_python_types_to_dynamodb(value[self.sort_key.pg_field_name])
+
+        # Add Local Secondary Index (LSI) fields
         for lsi in self.local_secondary_indexes:
             v = value.get(lsi.pg_field_name, not_found_sentinel)
             if v is not not_found_sentinel:
-                put_item[lsi.ddb_field_name] = v
+                put_item[lsi.ddb_field_name] = map_python_types_to_dynamodb(v)
+
+        # Add Global Secondary Index (GSI) fields
         for gsi in self.global_secondary_indexes:
             gsi_pkey_value = value.get(gsi.partition_key.pg_field_name, not_found_sentinel)
             if gsi_pkey_value is not not_found_sentinel:
-                put_item[gsi.partition_key.ddb_field_name] = gsi_pkey_value
+                put_item[gsi.partition_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_pkey_value)
             if gsi.sort_key is not not_found_sentinel:
                 gsi_skey_value = value.get(gsi.sort_key.pg_field_name, not_found_sentinel)
                 if gsi_skey_value is not not_found_sentinel:
-                    put_item[gsi.sort_key.ddb_field_name] = gsi_skey_value
+                    put_item[gsi.sort_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_skey_value)
+
+        # Add other fields marked with mapped_attr
+        #
+        # FIXME: does this also replace all the LSI & GSI logic above, since they also have mapped_attr on them? Maybe,
+        # but needs testing... integration tests don't cover these cases yet so I have no confidence in it.
+        for column_name, column in self.columns.items():
+            mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
+            if mapped_attr is not not_found_sentinel:
+                field_value = value.get(column_name, not_found_sentinel)
+                if field_value is not not_found_sentinel:
+                    put_item[mapped_attr] = map_python_types_to_dynamodb(field_value)
+
         self.pending_batch_write.append({
             'PutItem': put_item
         })
@@ -770,6 +838,12 @@ class DynamoFdw(ForeignDataWrapper):
         # WARNING:  update oldvalues: 'idkey2', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"id": "idkey2", "number_column": 1234.5678}'}
         # WARNING:  update oldvalues: 'idkey7', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"map_column": {"field1": "value1"}, "id": "idkey7"}'}
         # WARNING:  update oldvalues: 'idkey1', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"string_column": "This is a string column", "id": "idkey1"}'}
+        #
+        # Challenges to implementation:
+        # - if oid doesn't change then it's the same logic as insert(), but if oid changes then it's a delete and insert
+        #   which isn't transactionally safe...
+        # - update() might theoretically, in the future, support partial updates (where newvalues doesn't contain every
+        #   field) from multicorn; that wouldn't work with put_item
         log_to_postgres("update oldvalues: %r, newvalues: %r" % (oldvalues, newvalues), DEBUG)
         log_to_postgres("UPDATE operation is not currently supported on DynamoDB FDW tables", ERROR)
 

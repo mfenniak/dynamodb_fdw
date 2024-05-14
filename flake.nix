@@ -16,8 +16,12 @@
     flake-utils.lib.eachDefaultSystem (system: let
       debugBuild = false;
       pkgs = nixpkgs.legacyPackages.${system};
+
+      # PG15 & Python 3.10 are latest supported by multicorn2... but we use PG16 because it has better initdb options
+      # for creating the init script.  Need to get upstream support solid with this version.
       postgresql = pkgs.postgresql_16.overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild { dontStrip = true; }); # If debug symbols are needed.
-      python = pkgs.python3;
+      python = pkgs.python3;  # should use python3.10, but, results in a slower CI and we don't have a nix cache there... so... this is fine...
+
       multicorn2 = (mfenniak.packages.${system}.multicorn2 postgresql python)
         .overrideAttrs (oldAttrs: {} // pkgs.lib.optionalAttrs debugBuild {
           env.NIX_CFLAGS_COMPILE = "-O0 -g";
