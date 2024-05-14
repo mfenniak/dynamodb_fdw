@@ -7,6 +7,21 @@ from multicorn.utils import log_to_postgres, ERROR, WARNING, DEBUG, INFO
 from botocore.config import Config
 import boto3
 import simplejson as json
+from boto3.dynamodb.types import Binary
+
+def map_python_types_to_dynamodb(value):
+    """
+    Recursively convert all bytes objects to boto3's Binary wrapper in the given dictionary.
+    """
+    if isinstance(value, bytes):
+        raise Exception("converting %r to Binary")
+        return Binary(value)
+    elif isinstance(value, dict):
+        return {k: map_python_types_to_dynamodb(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [map_python_types_to_dynamodb(v) for v in value]
+    else:
+        return value
 
 def get_dynamodb(aws_region):
     boto_config = Config(region_name=aws_region)
@@ -756,36 +771,42 @@ class DynamoFdw(ForeignDataWrapper):
         put_item = {}
 
         # Add the document field to the put_item
-        put_item.update(json.loads(value[self.document_field.pg_field_name]))
+        document_data = json.loads(value[self.document_field.pg_field_name])
+        put_item.update(map_python_types_to_dynamodb(document_data))
 
         # Add the partition key and sort key
-        put_item[self.partition_key.ddb_field_name] = value[self.partition_key.pg_field_name]
+        put_item[self.partition_key.ddb_field_name] = map_python_types_to_dynamodb(value[self.partition_key.pg_field_name])
         if self.sort_key is not not_found_sentinel:
-            put_item[self.sort_key.ddb_field_name] = value[self.sort_key.pg_field_name]
+            put_item[self.sort_key.ddb_field_name] = map_python_types_to_dynamodb(value[self.sort_key.pg_field_name])
 
         # Add Local Secondary Index (LSI) fields
         for lsi in self.local_secondary_indexes:
             v = value.get(lsi.pg_field_name, not_found_sentinel)
             if v is not not_found_sentinel:
-                put_item[lsi.ddb_field_name] = v
+                put_item[lsi.ddb_field_name] = map_python_types_to_dynamodb(v)
 
         # Add Global Secondary Index (GSI) fields
         for gsi in self.global_secondary_indexes:
             gsi_pkey_value = value.get(gsi.partition_key.pg_field_name, not_found_sentinel)
             if gsi_pkey_value is not not_found_sentinel:
-                put_item[gsi.partition_key.ddb_field_name] = gsi_pkey_value
+                put_item[gsi.partition_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_pkey_value)
             if gsi.sort_key is not not_found_sentinel:
                 gsi_skey_value = value.get(gsi.sort_key.pg_field_name, not_found_sentinel)
                 if gsi_skey_value is not not_found_sentinel:
-                    put_item[gsi.sort_key.ddb_field_name] = gsi_skey_value
+                    put_item[gsi.sort_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_skey_value)
 
         # Add other fields marked with mapped_attr
+         # FIXME: it seems kinda redundant to do the above GSI and LSI mappings since they will all be marked with
+        # `mapped_attr` as well -- does this replace both of those code paths?  Maybe, but needs testing.
         for column_name, column in self.columns.items():
             mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
             if mapped_attr is not not_found_sentinel:
                 field_value = value.get(column_name, not_found_sentinel)
                 if field_value is not not_found_sentinel:
-                    put_item[mapped_attr] = field_value
+                    # FIXME: remove debug code
+                    # if column_name == 'test_bytea_field':
+                    #     raise Exception('test output field_value = %r' % (field_value,))
+                    put_item[mapped_attr] = map_python_types_to_dynamodb(field_value)
 
         self.pending_batch_write.append({
             'PutItem': put_item

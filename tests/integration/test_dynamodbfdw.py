@@ -247,8 +247,8 @@ def custom_import_schema(pg_connection, multicorn_dynamo, string_table):
 def string_table_custom_schema_data(pg_connection, string_table):
     with pg_connection.cursor() as cur:
         cur.execute(
-            sql.SQL('INSERT INTO dynamodbfdw_manual_test.{} (pkey, test_text_field, test_bytea_field, document) VALUES (%s, %s, %s, %s)').format(sql.Identifier(string_table)),
-            ['pkey-value-1', 'test custom field with mapped_attr', b'\x00\x00\x00\x01', json.dumps({'doc-attr-1': 'doc-value-1'})]
+            sql.SQL("INSERT INTO dynamodbfdw_manual_test.{} (pkey, test_text_field, test_bytea_field, document) VALUES (%s, %s, '\\x00010203'::bytea, %s)").format(sql.Identifier(string_table)),
+            ['pkey-value-1', 'test custom field with mapped_attr', json.dumps({'doc-attr-1': 'doc-value-1'})]
         )
         pg_connection.commit()
     yield
@@ -265,6 +265,6 @@ def test_mapped_attr_insert(pg_connection, custom_import_schema, string_table, s
             '{"pkey": "pkey-value-1"}',
             'pkey-value-1',
             'test custom field with mapped_attr',
-            b'\x00\x00\x00\x01',
+            b'\x00\x01\x02\x03',
             {'pkey': 'pkey-value-1', 'test_attr': 'test custom field with mapped_attr', 'doc-attr-1': 'doc-value-1'}
         )]
