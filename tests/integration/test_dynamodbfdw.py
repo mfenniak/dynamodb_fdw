@@ -266,5 +266,10 @@ def test_mapped_attr_insert(pg_connection, custom_import_schema, string_table, s
             'pkey-value-1',
             'test custom field with mapped_attr',
             b'\x00\x01\x02\x03',
-            {'pkey': 'pkey-value-1', 'test_attr': 'test custom field with mapped_attr', 'doc-attr-1': 'doc-value-1'}
+            {
+                'pkey': 'pkey-value-1',
+                'test_attr': 'test custom field with mapped_attr',
+                'test_binary_attr': '\\x00010203',
+                'doc-attr-1': 'doc-value-1'
+            }
         )]

@@ -14,7 +14,6 @@ def map_python_types_to_dynamodb(value):
     Recursively convert all bytes objects to boto3's Binary wrapper in the given dictionary.
     """
     if isinstance(value, bytes):
-        # raise Exception("debug output -- successfully hit bytes type -- converting %r to Binary") # FIXME: Remove
         return Binary(value)
     elif isinstance(value, dict):
         return {k: map_python_types_to_dynamodb(v) for k, v in value.items()}
@@ -51,7 +50,8 @@ class MyJsonEncoder(json.JSONEncoder):
         if isinstance(o, set):
             return list(o)
         elif isinstance(o, Binary):
-            return o.value
+            # format bytes into json doc as "\x00"...
+            return "\\x" + o.value.hex()
         return super().default(o)
 
 not_found_sentinel = object()
@@ -761,7 +761,6 @@ class DynamoFdw(ForeignDataWrapper):
                     if mapped_attr is not not_found_sentinel:
                         ddb_value = ddb_row.get(mapped_attr, not_found_sentinel)
                         if ddb_value is not not_found_sentinel:
-                            log_to_postgres("execute fetch colmn %r w/ ddb key %r and value %r" % (column_name, mapped_attr, ddb_value), WARNING)
                             pg_row[column_name] = map_dynamodb_types_to_python(ddb_value)
 
                 yield pg_row
