@@ -699,7 +699,6 @@ class DynamoFdw(ForeignDataWrapper):
     def execute(self, quals, columns):
         log_to_postgres("quals repr: %r" % (quals,), DEBUG)
         log_to_postgres("columns repr: %r" % (columns,), DEBUG)
-        log_to_postgres("columns repr: %r" % (columns,), DEBUG)
 
         row_provider = self.plan_query(quals)
         table = get_table(self.aws_region, self.table_name)
@@ -712,6 +711,7 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[self.sort_key.pg_field_name] = ddb_row[self.sort_key.ddb_field_name]
                 # at this point, pg_row contains all the unique identifiers of the row; exactly what oid needs to contain
                 pg_row['oid'] = json.dumps(pg_row)
+
                 # populate any secondary-index columns for PG-based filtering and consistency/display
                 for lsi in self.local_secondary_indexes:
                     pg_row[lsi.pg_field_name] = ddb_row.get(lsi.ddb_field_name)
@@ -719,7 +719,16 @@ class DynamoFdw(ForeignDataWrapper):
                     pg_row[gsi.partition_key.pg_field_name] = ddb_row.get(gsi.partition_key.ddb_field_name)
                     if gsi.sort_key is not not_found_sentinel:
                         pg_row[gsi.sort_key.pg_field_name] = ddb_row.get(gsi.sort_key.ddb_field_name)
+
+                # populate the document field
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
+
+                # populate all other mapped attributes
+                for column_name, column in self.columns.items():
+                    mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
+                    if mapped_attr is not not_found_sentinel:
+                        pg_row[column_name] = ddb_row.get(mapped_attr)
+
                 yield pg_row
         finally:
             # this is wrapped in a finally because iteration may be aborted from a query's LIMIT clause, but we still want the log message
@@ -745,14 +754,22 @@ class DynamoFdw(ForeignDataWrapper):
         # {'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
         log_to_postgres("insert row: %r" % (value,), DEBUG)
         put_item = {}
+
+        # Add the document field to the put_item
         put_item.update(json.loads(value[self.document_field.pg_field_name]))
+
+        # Add the partition key and sort key
         put_item[self.partition_key.ddb_field_name] = value[self.partition_key.pg_field_name]
         if self.sort_key is not not_found_sentinel:
             put_item[self.sort_key.ddb_field_name] = value[self.sort_key.pg_field_name]
+
+        # Add Local Secondary Index (LSI) fields
         for lsi in self.local_secondary_indexes:
             v = value.get(lsi.pg_field_name, not_found_sentinel)
             if v is not not_found_sentinel:
                 put_item[lsi.ddb_field_name] = v
+
+        # Add Global Secondary Index (GSI) fields
         for gsi in self.global_secondary_indexes:
             gsi_pkey_value = value.get(gsi.partition_key.pg_field_name, not_found_sentinel)
             if gsi_pkey_value is not not_found_sentinel:
@@ -761,6 +778,15 @@ class DynamoFdw(ForeignDataWrapper):
                 gsi_skey_value = value.get(gsi.sort_key.pg_field_name, not_found_sentinel)
                 if gsi_skey_value is not not_found_sentinel:
                     put_item[gsi.sort_key.ddb_field_name] = gsi_skey_value
+
+        # Add other fields marked with mapped_attr
+        for column_name, column in self.columns.items():
+            mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
+            if mapped_attr is not not_found_sentinel:
+                field_value = value.get(column_name, not_found_sentinel)
+                if field_value is not not_found_sentinel:
+                    put_item[mapped_attr] = field_value
+
         self.pending_batch_write.append({
             'PutItem': put_item
         })
