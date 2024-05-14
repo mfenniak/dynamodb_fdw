@@ -734,6 +734,7 @@ class DynamoFdw(ForeignDataWrapper):
         table = get_table(self.aws_region, self.table_name)
 
         try:
+            # FIXME: pass `columns` into get_rows and use them as a projection to only retrieve the columns requested
             for ddb_row in row_provider.get_rows(table):
                 pg_row = {}
                 pg_row[self.partition_key.pg_field_name] = ddb_row[self.partition_key.ddb_field_name]
@@ -753,10 +754,13 @@ class DynamoFdw(ForeignDataWrapper):
                 # populate the document field
                 pg_row[self.document_field.pg_field_name] = json.dumps(ddb_row, cls=MyJsonEncoder)
 
-                # populate all other mapped attributes
-                # FIXME: does this also replace all the LSI & GSI logic above?  Maybe, but needs testing.
-                # FIXME: ideally should just fetch the values from the 'columns' requested in execute...
+                # populate any other mapped attributes
+                # FIXME: does this also replace all the LSI & GSI logic above, since they also have mapped_attr on them?
+                # Maybe, but needs testing... integration tests don't cover these cases yet so I have no confidence in
+                # it.
                 for column_name, column in self.columns.items():
+                    if column_name not in columns:
+                        continue
                     mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
                     if mapped_attr is not not_found_sentinel:
                         ddb_value = ddb_row.get(mapped_attr, not_found_sentinel)
@@ -787,7 +791,6 @@ class DynamoFdw(ForeignDataWrapper):
         # called once for each value to be inserted, where the value is the structure of the dynamodb FDW table; eg.
         # {'partition_key': 'key74', 'sort_key': None, 'document': '{}'}
         log_to_postgres("insert row: %r" % (value,), DEBUG)
-        # raise Exception('insert(%r)' % (value))
         put_item = {}
 
         # Add the document field to the put_item
@@ -816,16 +819,14 @@ class DynamoFdw(ForeignDataWrapper):
                     put_item[gsi.sort_key.ddb_field_name] = map_python_types_to_dynamodb(gsi_skey_value)
 
         # Add other fields marked with mapped_attr
-        # FIXME: it seems kinda redundant to do the above GSI and LSI mappings since they will all be marked with
-        # `mapped_attr` as well -- does this replace both of those code paths?  Maybe, but needs testing.
+        #
+        # FIXME: does this also replace all the LSI & GSI logic above, since they also have mapped_attr on them? Maybe,
+        # but needs testing... integration tests don't cover these cases yet so I have no confidence in it.
         for column_name, column in self.columns.items():
             mapped_attr = column.options.get('mapped_attr', not_found_sentinel)
             if mapped_attr is not not_found_sentinel:
                 field_value = value.get(column_name, not_found_sentinel)
                 if field_value is not not_found_sentinel:
-                    # FIXME: remove debug code
-                    # if column_name == 'test_bytea_field':
-                    #     raise Exception('test output field_value = %r' % (field_value,))
                     put_item[mapped_attr] = map_python_types_to_dynamodb(field_value)
 
         self.pending_batch_write.append({
@@ -837,6 +838,12 @@ class DynamoFdw(ForeignDataWrapper):
         # WARNING:  update oldvalues: 'idkey2', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"id": "idkey2", "number_column": 1234.5678}'}
         # WARNING:  update oldvalues: 'idkey7', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"map_column": {"field1": "value1"}, "id": "idkey7"}'}
         # WARNING:  update oldvalues: 'idkey1', newvalues: {'partition_key': 'woot', 'sort_key': None, 'document': '{"string_column": "This is a string column", "id": "idkey1"}'}
+        #
+        # Challenges to implementation:
+        # - if oid doesn't change then it's the same logic as insert(), but if oid changes then it's a delete and insert
+        #   which isn't transactionally safe...
+        # - update() might theoretically, in the future, support partial updates (where newvalues doesn't contain every
+        #   field) from multicorn; that wouldn't work with put_item
         log_to_postgres("update oldvalues: %r, newvalues: %r" % (oldvalues, newvalues), DEBUG)
         log_to_postgres("UPDATE operation is not currently supported on DynamoDB FDW tables", ERROR)
 
