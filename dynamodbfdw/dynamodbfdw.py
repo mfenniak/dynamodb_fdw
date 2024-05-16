@@ -876,3 +876,42 @@ class DynamoFdw(ForeignDataWrapper):
         # discard the batch write buffer
         log_to_postgres("FDW rollback; clearing %s write operations from buffer" % (len(self.pending_batch_write)), DEBUG)
         self.pending_batch_write = []
+
+    def get_path_keys(self):
+        path_keys = [
+            # (('oid',), 1) # theoretically a search for oid would return a single row... but I don't think we actually
+            # look for that in `execute`'s quals to support that search, so, don't offer it as a good option here.
+        ]
+
+        # Partition key + sort key should give us a single row; but if we don't have a sort key then the same is true
+        # for just partition key.
+        if self.partition_key is not not_found_sentinel:
+            if self.sort_key is not not_found_sentinel:
+                path_keys.append(((self.partition_key.pg_field_name, self.sort_key.pg_field_name), 1))
+                # hypothetically we could add just the partition key as a path key... but we wouldn't know how many rows
+                # it might return.  It could make sense to provide a value that is less than the default 100000000 to
+                # indicate that this is still more reduced data set... but I'm not sure if that's a good idea or not
+                # because the data in the table could still be any size.
+                # path_keys.append(((self.partition_key.pg_field_name,), 50000000))
+            else:
+                path_keys.append(((self.partition_key.pg_field_name,), 1))
+
+        # GSIs are also potential path keys where we know we could get a single row back.
+        for gsi in self.global_secondary_indexes:
+            if gsi.sort_key is not not_found_sentinel:
+                path_keys.append(((gsi.partition_key.pg_field_name, gsi.sort_key.pg_field_name), 1))
+                # Again, hypothetically we could add just the partition key as a path key...
+                # path_keys.append(((gsi.partition_key.pg_field_name,), 50000000))
+            else:
+                path_keys.append(((gsi.partition_key.pg_field_name,), 1))
+
+        # LSIs could be potential path keys but they don't guarantee a single row back.  Similar to the returning just
+        # the partition key when we have (pkey/sortkey), it's plausible to include them with some synthetic row value
+        # that is lower than the default, but I don't know if that's a good idea or not.
+        # for lsi in self.local_secondary_indexes:
+        #     if lsi.sort_key is not not_found_sentinel:
+        #         path_keys.append(((lsi.pg_field_name, lsi.sort_key.pg_field_name), 50000000))
+        #     else:
+        #         path_keys.append(((lsi.pg_field_name,), 50000000))
+
+        return path_keys

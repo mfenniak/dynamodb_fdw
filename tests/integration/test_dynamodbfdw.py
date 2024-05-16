@@ -270,3 +270,175 @@ def test_mapped_attr_insert(pg_connection, custom_import_schema, string_table, s
             'test_binary_attr': '\\x00010203',
             'doc-attr-1': 'doc-value-1'
         }
+
+def test_explain_pkey_join_nested_loop(pg_connection, import_schema, string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('''
+                EXPLAIN SELECT * FROM
+                    dynamodbfdw_import_test.{tbl} a
+                    INNER JOIN dynamodbfdw_import_test.{tbl} b ON (a.pkey = b.pkey)
+                WHERE a.pkey = %s
+                ''').format(tbl=sql.Identifier(string_table)),
+            ['pkey-value-1']
+        )
+        query_plan = cur.fetchall()
+        required_query_plan_rows = [
+            # The key thing we're looking for here is that get_path_keys() has allowed multicorn->PG to know that the
+            # estimated rows for the table aliased "b" is 1.  This will allow the planner to choose a nested loop join
+            # if the query is selective enough, rather than a merge join.
+            '  ->  Foreign Scan on "dynamodbfdw-string-pkey" b  (cost=20.00..300.00 rows=1 width=300)',
+            "        Filter: ((pkey = 'pkey-value-1'::text) AND (a.pkey = pkey))",
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
+
+def test_explain_pkey_skey_join_nested_loop(pg_connection, import_schema, string_string_table):
+    with pg_connection.cursor() as cur:
+        # more realistic join than test_explain_pkey_join_nested_loop -- different conditions on the sort key
+        cur.execute(
+            sql.SQL('''
+                EXPLAIN SELECT * FROM
+                    dynamodbfdw_import_test.{tbl} a
+                    INNER JOIN dynamodbfdw_import_test.{tbl} b ON (a.pkey = b.pkey AND b.skey = 's-key-value-2')
+                WHERE a.pkey = %s AND a.skey = %s
+                ''').format(tbl=sql.Identifier(string_string_table)),
+            ['pkey-value-1', 'skey-value-1']
+        )
+        query_plan = cur.fetchall()
+        for row in query_plan:
+            print(row)
+        required_query_plan_rows = [
+            # The key thing we're looking for here is that get_path_keys() has allowed multicorn->PG to know that the
+            # estimated rows for the table aliased "b" is 1.  This will allow the planner to choose a nested loop join
+            # if the query is selective enough, rather than a merge join.
+            '  ->  Foreign Scan on "dynamodbfdw-string-pkey-string-skey" b  (cost=20.00..400.00 rows=1 width=400)',
+            "        Filter: ((pkey = 'pkey-value-1'::text) AND (skey = 's-key-value-2'::text) AND (a.pkey = pkey) AND (skey = 's-key-value-2'::text))",
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
+
+@pytest.fixture(scope='session')
+def string_table_with_string_gsi(dynamodb_resource, dynamodb_client):
+    table_name = 'dynamodbfdw-string-pkey-string-gsi'
+    try:
+        dynamodb_resource.Table(table_name).key_schema
+    except:
+        dynamodb_client.create_table(
+            AttributeDefinitions=[
+                {
+                    'AttributeName': 'pkey',
+                    'AttributeType': 'S',
+                },
+                {
+                    'AttributeName': 'gsi-skey',
+                    'AttributeType': 'S',
+                },
+            ],
+            TableName=table_name,
+            KeySchema=[
+                {
+                    'AttributeName': 'pkey',
+                    'KeyType': 'HASH',
+                }
+            ],
+            BillingMode='PAY_PER_REQUEST',
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'gsi-skey',
+                    'KeySchema': [
+                        {
+                            'AttributeName': 'gsi-skey',
+                            'KeyType': 'HASH',
+                        }
+                    ],
+                    'Projection': {
+                        'ProjectionType': 'ALL',
+                    }
+                }
+            ]
+        )
+        dynamodb_resource.Table(table_name).wait_until_exists()
+    return table_name
+
+@pytest.fixture
+def string_table_with_string_gsi_data(pg_connection, string_table_with_string_gsi):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, "gsi-skey", document) VALUES (%s, %s, %s)').format(sql.Identifier(string_table_with_string_gsi)),
+            ['pkey-value-1', 'gsi-key-value-1', json.dumps({'doc-attr-1': 'doc-value-1'})]
+        )
+        pg_connection.commit()
+    yield
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table_with_string_gsi)))
+        pg_connection.commit()
+
+
+def test_query_by_gsi(pg_connection, import_schema, string_table_with_string_gsi, string_table_with_string_gsi_data):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('SELECT * FROM dynamodbfdw_import_test.{} WHERE "gsi-skey" = %s').format(sql.Identifier(string_table_with_string_gsi)),
+            ['gsi-key-value-1']
+        )
+        data = cur.fetchall()
+        assert data == [(
+            '{"pkey": "pkey-value-1"}',
+            'pkey-value-1',
+            'gsi-key-value-1',
+            {'pkey': 'pkey-value-1', 'gsi-skey': 'gsi-key-value-1', 'doc-attr-1': 'doc-value-1'}
+        )]
+
+def test_explain_gsikey_equal(pg_connection, import_schema, string_table_with_string_gsi):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('EXPLAIN SELECT * FROM dynamodbfdw_import_test.{} WHERE "gsi-skey" = %s').format(sql.Identifier(string_table_with_string_gsi)),
+            ['pkey-value-1']
+        )
+        query_plan = cur.fetchall()
+        for row in query_plan:
+            print(repr(row))
+        # It's possible that micro adjustments in this query plan will happen w/ new versions of Postgres or Multicorn,
+        # so we try to be a bit flexible and just pick out the important bits we want to test for.
+        required_query_plan_rows = [
+            'Foreign Scan on "dynamodbfdw-string-pkey-string-gsi"  (cost=20.00..40000000000.00 rows=100000000 width=400)',
+            '  Filter: ("gsi-skey" = \'pkey-value-1\'::text)',
+            '  Multicorn: DynamoDB: pagination provider',
+            # "Query table", rather than "Scan table", means that we're doing a DynamoDB Query operation.  That's what
+            # we expect here because we're doing an exact GSI search, and is more efficient than a Scan.
+            '  Multicorn:   DynamoDB: Query table dynamodbfdw-string-pkey-string-gsi from us-east-1',
+            '  Multicorn:       "IndexName": "gsi-skey",',
+            '  Multicorn:       "KeyConditions": {',
+            '  Multicorn:         "gsi-skey": {',
+            '  Multicorn:           "AttributeValueList": [',
+            '  Multicorn:             "pkey-value-1"',
+            '  Multicorn:           ],',
+            '  Multicorn:           "ComparisonOperator": "EQ"',
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
+
+def test_explain_gsi_join(pg_connection, import_schema, string_string_table, string_table_with_string_gsi):
+    with pg_connection.cursor() as cur:
+        # more realistic join than test_explain_pkey_join_nested_loop -- different conditions on the sort key
+        cur.execute(
+            sql.SQL('''
+                EXPLAIN SELECT * FROM
+                    dynamodbfdw_import_test.{string_string_table} a
+                    INNER JOIN dynamodbfdw_import_test.{string_table_with_string_gsi} b ON (b."gsi-skey" = a.pkey)
+                WHERE a.pkey = %s
+                ''').format(
+                    string_string_table=sql.Identifier(string_string_table),
+                    string_table_with_string_gsi=sql.Identifier(string_table_with_string_gsi),
+                ),
+            ['pkey-value-1']
+        )
+        # FUTURE: support join value, like, a.document->>'gsi-value'?  currently segfaults...
+        query_plan = cur.fetchall()
+        for row in query_plan:
+            print(row)
+        required_query_plan_rows = [
+            # The key thing we're looking for here is that get_path_keys() has allowed multicorn->PG to know that the
+            # estimated rows for the table aliased "b" is 1.  This will allow the planner to choose a nested loop join
+            # if the query is selective enough, rather than a merge join.
+            '  ->  Foreign Scan on "dynamodbfdw-string-pkey-string-gsi" b  (cost=20.00..400.00 rows=1 width=400)',
+            '        Filter: (("gsi-skey" = \'pkey-value-1\'::text) AND ("gsi-skey" = a.pkey))',
+        ]
+        assert_contains_rows(query_plan, required_query_plan_rows)
