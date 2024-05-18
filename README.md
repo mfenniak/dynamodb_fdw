@@ -230,7 +230,7 @@ NOTICE:  DynamoDB FDW retrieved 1 pages containing 2004 records; DynamoDB scanne
 (2 rows)
 ```
 
-Again, it will tend to perform a full-scan and be slow... but that's neat!  Two more little tricks...
+Again, it will tend to perform a full-scan and be slow... but that's neat!  We can also do modifications...
 
 ```
 => DELETE FROM fdwtest2
@@ -255,6 +255,8 @@ INSERT 0 2
 ```
 
 DELETE & INSERT operations are both supported.  UPDATE is not currently.  Write operations are even transaction-aware -- if you make modifications in a PostgreSQL transaction, then they will not be written to DynamoDB until the transaction is committed.  Atomic PostgreSQL & DynamoDB updates are not guaranteed.
+
+If you want to get a little crazy, dynamodb_fdw can efficiently (well, somewhat!) perform joins on tables that based upon their partition+sort keys and global secondary indexes.  This is possible because we can tell PostgreSQL that a query against the partition+sort key or GSI will return a single row, and PostgreSQL can use that information to optimize the join into a nested loop, performing multiple individual queries.  Joins that aren't against enough information to get to a single-row aren't currently supported because we can't estimate the number of rows that will be returned, but that could be added in the future.  To see if your query will be optimized, run an `EXPLAIN` against it and check for the presence of "Query table" nodes, rather than "Scan table nodes".
 
 ## Future Plans
 

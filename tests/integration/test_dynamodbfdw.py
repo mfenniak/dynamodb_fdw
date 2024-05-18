@@ -422,7 +422,7 @@ def test_explain_gsi_join(pg_connection, import_schema, string_string_table, str
             sql.SQL('''
                 EXPLAIN SELECT * FROM
                     dynamodbfdw_import_test.{string_string_table} a
-                    INNER JOIN dynamodbfdw_import_test.{string_table_with_string_gsi} b ON (b."gsi-skey" = a.pkey)
+                    INNER JOIN dynamodbfdw_import_test.{string_table_with_string_gsi} b ON (b."gsi-skey" = a.document->>'sub-id')
                 WHERE a.pkey = %s
                 ''').format(
                     string_string_table=sql.Identifier(string_string_table),
@@ -430,7 +430,6 @@ def test_explain_gsi_join(pg_connection, import_schema, string_string_table, str
                 ),
             ['pkey-value-1']
         )
-        # FUTURE: support join value, like, a.document->>'gsi-value'?  currently segfaults...
         query_plan = cur.fetchall()
         for row in query_plan:
             print(row)
@@ -439,6 +438,74 @@ def test_explain_gsi_join(pg_connection, import_schema, string_string_table, str
             # estimated rows for the table aliased "b" is 1.  This will allow the planner to choose a nested loop join
             # if the query is selective enough, rather than a merge join.
             '  ->  Foreign Scan on "dynamodbfdw-string-pkey-string-gsi" b  (cost=20.00..400.00 rows=1 width=400)',
-            '        Filter: (("gsi-skey" = \'pkey-value-1\'::text) AND ("gsi-skey" = a.pkey))',
+            '        Filter: ("gsi-skey" = (a.document ->> \'sub-id\'::text))',
+            '        Multicorn:           "AttributeValueList": [',
+            '        Multicorn:             "?"',
+            '        Multicorn:           ],',
         ]
         assert_contains_rows(query_plan, required_query_plan_rows)
+
+@pytest.fixture
+def gsi_join_data(pg_connection, import_schema, string_table, string_table_with_string_gsi):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, document) VALUES (%s, %s)').format(sql.Identifier(string_table)),
+            ['pkey-value-1', json.dumps({'name': 'Jack Bauer', 'sub-id': 'doc-value-1'})]
+        )
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, document) VALUES (%s, %s)').format(sql.Identifier(string_table)),
+            ['pkey-value-2', json.dumps({'name': 'Gil Grissom', 'sub-id': 'doc-value-2'})]
+        )
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, document) VALUES (%s, %s)').format(sql.Identifier(string_table)),
+            ['pkey-value-3', json.dumps({'name': 'Taylor Swift'})]
+        )
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, "gsi-skey", document) VALUES (%s, %s, %s)').format(sql.Identifier(string_table_with_string_gsi)),
+            ['other-key-value-1', 'doc-value-1', json.dumps({'occupation': 'Agent'})]
+        )
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, "gsi-skey", document) VALUES (%s, %s, %s)').format(sql.Identifier(string_table_with_string_gsi)),
+            ['other-key-value-2', 'doc-value-2', json.dumps({'occupation': 'CSI'})]
+        )
+        pg_connection.commit()
+    yield
+    with pg_connection.cursor() as cur:
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table_with_string_gsi)))
+        pg_connection.commit()
+
+def test_gsi_join(pg_connection, gsi_join_data, string_table, string_table_with_string_gsi):
+    del pg_connection.notices[:] # clear out any notices from previous queries
+    with pg_connection.cursor() as cur:
+        # more realistic join than test_explain_pkey_join_nested_loop -- different conditions on the sort key
+        cur.execute(
+            sql.SQL('''
+                SELECT
+                    a.document->>'name' AS name, b.document->>'occupation' AS occupation
+                FROM
+                    dynamodbfdw_import_test.{string_table} a
+                    INNER JOIN dynamodbfdw_import_test.{string_table_with_string_gsi} b ON (b."gsi-skey" = a.document->>'sub-id')
+                WHERE
+                    a.pkey IN (%s, %s)
+                ORDER BY a.document->>'name'
+                ''').format(
+                    string_table=sql.Identifier(string_table),
+                    string_table_with_string_gsi=sql.Identifier(string_table_with_string_gsi),
+                ),
+            ['pkey-value-1', 'pkey-value-2']
+        )
+        assert cur.fetchall() == [
+            ("Gil Grissom", "CSI"),
+            ("Jack Bauer", "Agent")
+        ]
+        assert pg_connection.notices == [
+            # Each row retrieved from string_table will cause a Query operation to be performed on the GSI table because
+            # we're joining on the GSI key (as opposed to scanning the entire table and doing a merge join or something
+            # like that); caused by the get_path_keys() method in the FDW.  Absent get_path_keys the functional join
+            # works just fine, but it reads the entire table.
+            'NOTICE:  DynamoDB FDW retrieved 1 pages containing 1 records; DynamoDB scanned 1 records server-side\n',
+            'NOTICE:  DynamoDB FDW retrieved 1 pages containing 1 records; DynamoDB scanned 1 records server-side\n',
+            # And one query on the string_table itself:
+            'NOTICE:  DynamoDB FDW retrieved 2 pages containing 2 records; DynamoDB scanned 2 records server-side\n',
+        ]

@@ -866,9 +866,11 @@ class DynamoFdw(ForeignDataWrapper):
                 item_del_op = item.get('Delete', not_found_sentinel)
                 if item_del_op is not not_found_sentinel:
                     batch.delete_item(Key=item_del_op)
+                    log_to_postgres("pre_commit; delete_item Key=%r" % (item_del_op,), DEBUG)
                 item_ins_op = item.get('PutItem', not_found_sentinel)
                 if item_ins_op is not not_found_sentinel:
                     batch.put_item(Item=item_ins_op)
+                    log_to_postgres("pre_commit; put_item Item=%r" % (item_ins_op,), DEBUG)
 
         self.pending_batch_write = []
 
