@@ -794,8 +794,10 @@ class DynamoFdw(ForeignDataWrapper):
         put_item = {}
 
         # Add the document field to the put_item
-        document_data = json.loads(value[self.document_field.pg_field_name])
-        put_item.update(map_python_types_to_dynamodb(document_data))
+        document_value = value.get(self.document_field.pg_field_name, None)
+        if document_value is not None:
+            document_data = json.loads(document_value)
+            put_item.update(map_python_types_to_dynamodb(document_data))
 
         # Add the partition key and sort key
         put_item[self.partition_key.ddb_field_name] = map_python_types_to_dynamodb(value[self.partition_key.pg_field_name])
