@@ -509,3 +509,23 @@ def test_gsi_join(pg_connection, gsi_join_data, string_table, string_table_with_
             # And one query on the string_table itself:
             'NOTICE:  DynamoDB FDW retrieved 2 pages containing 2 records; DynamoDB scanned 2 records server-side\n',
         ]
+
+def test_empty_document_insert(pg_connection, string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey, document) VALUES (%s, %s)').format(sql.Identifier(string_table)),
+            ['pkey-value-1', '{}']
+        )
+        pg_connection.commit()
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
+        pg_connection.commit()
+
+def test_null_document_insert(pg_connection, string_table):
+    with pg_connection.cursor() as cur:
+        cur.execute(
+            sql.SQL('INSERT INTO dynamodbfdw_import_test.{} (pkey) VALUES (%s)').format(sql.Identifier(string_table)),
+            ['pkey-value-1']
+        )
+        pg_connection.commit()
+        cur.execute(sql.SQL('DELETE FROM dynamodbfdw_import_test.{}').format(sql.Identifier(string_table)))
+        pg_connection.commit()
