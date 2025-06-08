@@ -1,3 +1,6 @@
+> [!IMPORTANT]  
+> This repository is archived.  The active project has been moved to [https://forgejo.kainnef.com/mfenniak/dynamodb_fdw/](https://forgejo.kainnef.com/mfenniak/dynamodb_fdw/)
+
 # DynamoDB Foreign Data Wrapper for PostgreSQL
 
 dynamodb_fdw allows for the querying and modification of data stored in AWS DynamoDB tables from PostgreSQL.
